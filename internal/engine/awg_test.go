@@ -1,8 +1,12 @@
 package engine
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/BeesKnight/vpnctl/internal/profile"
 )
 
 const sampleAmneziaConf = `[Interface]
@@ -43,11 +47,35 @@ func TestRewriteEndpointPreservesObfuscationFields(t *testing.T) {
 			t.Errorf("expected obfuscation field %q to survive rewrite, got:\n%s", field, out)
 		}
 	}
+	if strings.Contains(out, "DNS") {
+		t.Errorf("expected DNS line to be dropped so awg-quick never calls resolvconf, got:\n%s", out)
+	}
 }
 
 func TestRewriteEndpointErrorsWithoutPeerSection(t *testing.T) {
 	_, err := rewriteEndpoint("[Interface]\nPrivateKey = x\n", "1.2.3.4", 51820)
 	if err == nil {
 		t.Fatal("expected error when there is no Endpoint line to rewrite")
+	}
+}
+
+func TestAWGQuickBinaryDoesNotUseWGQuickForAmneziaWG(t *testing.T) {
+	dir := t.TempDir()
+	wgQuick := filepath.Join(dir, "wg-quick")
+	if err := os.WriteFile(wgQuick, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", dir)
+
+	got, err := awgQuickBinary(profile.KindWireGuard)
+	if err != nil {
+		t.Fatalf("plain WireGuard should fall back to wg-quick: %v", err)
+	}
+	if got != "wg-quick" {
+		t.Fatalf("expected wg-quick fallback, got %q", got)
+	}
+
+	if _, err := awgQuickBinary(profile.KindAmneziaWG); err == nil {
+		t.Fatal("expected AmneziaWG to require awg-quick instead of falling back to wg-quick")
 	}
 }

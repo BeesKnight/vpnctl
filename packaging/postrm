@@ -31,22 +31,29 @@ remove_config_dirs() {
 remove_installed_deps() {
   [ -f "$DEPS_FILE" ] || return 0
   installed_singbox="false"
-  installed_awg="false"
+  installed_awg_tools="false"
+  installed_amneziawg_go="false"
   if command -v jq >/dev/null 2>&1; then
     installed_singbox="$(jq -r '.sing_box // false' "$DEPS_FILE" 2>/dev/null || echo false)"
-    installed_awg="$(jq -r '.amneziawg // false' "$DEPS_FILE" 2>/dev/null || echo false)"
+    installed_awg_tools="$(jq -r '.amneziawg_tools // .amneziawg // false' "$DEPS_FILE" 2>/dev/null || echo false)"
+    installed_amneziawg_go="$(jq -r '.amneziawg_go // .amneziawg // false' "$DEPS_FILE" 2>/dev/null || echo false)"
   else
     grep -q '"sing_box": *true' "$DEPS_FILE" && installed_singbox="true"
-    grep -q '"amneziawg": *true' "$DEPS_FILE" && installed_awg="true"
+    grep -Eq '"amneziawg_tools": *true|"amneziawg": *true' "$DEPS_FILE" && installed_awg_tools="true"
+    grep -Eq '"amneziawg_go": *true|"amneziawg": *true' "$DEPS_FILE" && installed_amneziawg_go="true"
   fi
 
   if [ "$installed_singbox" = "true" ]; then
     echo "vpnctl postrm: removing sing-box (installed by vpnctl)"
-    rm -f /usr/local/bin/sing-box
+    rm -f /usr/bin/sing-box /usr/local/bin/sing-box
   fi
-  if [ "$installed_awg" = "true" ]; then
-    echo "vpnctl postrm: removing amneziawg-tools/amneziawg-go (installed by vpnctl)"
-    rm -f /usr/local/bin/awg-quick /usr/local/bin/awg /usr/local/bin/amneziawg-go
+  if [ "$installed_awg_tools" = "true" ]; then
+    echo "vpnctl postrm: removing amneziawg-tools (installed by vpnctl)"
+    rm -f /usr/bin/awg-quick /usr/bin/awg /usr/local/bin/awg-quick /usr/local/bin/awg
+  fi
+  if [ "$installed_amneziawg_go" = "true" ]; then
+    echo "vpnctl postrm: removing amneziawg-go (installed by vpnctl)"
+    rm -f /usr/bin/amneziawg-go /usr/local/bin/amneziawg-go
   fi
 }
 

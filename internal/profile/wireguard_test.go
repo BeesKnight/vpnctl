@@ -76,3 +76,36 @@ func TestParseWireGuardRejectsMissingEndpoint(t *testing.T) {
 		t.Fatal("expected error for [Peer] section missing Endpoint")
 	}
 }
+
+func TestDNSServersParsesCommaSeparatedIPs(t *testing.T) {
+	cfg, err := ParseWireGuard("[Interface]\nPrivateKey = x\nDNS = 1.1.1.1, 8.8.8.8\n\n[Peer]\nPublicKey = y\nEndpoint = 1.2.3.4:51820\n")
+	if err != nil {
+		t.Fatalf("ParseWireGuard: %v", err)
+	}
+	got := cfg.DNSServers()
+	want := []string{"1.1.1.1", "8.8.8.8"}
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("expected %v, got %v", want, got)
+	}
+}
+
+func TestDNSServersSkipsNonIPEntries(t *testing.T) {
+	cfg, err := ParseWireGuard("[Interface]\nPrivateKey = x\nDNS = 1.1.1.1, mydomain.local\n\n[Peer]\nPublicKey = y\nEndpoint = 1.2.3.4:51820\n")
+	if err != nil {
+		t.Fatalf("ParseWireGuard: %v", err)
+	}
+	got := cfg.DNSServers()
+	if len(got) != 1 || got[0] != "1.1.1.1" {
+		t.Errorf("expected only the valid IP to survive, got %v", got)
+	}
+}
+
+func TestDNSServersNilWhenAbsent(t *testing.T) {
+	cfg, err := ParseWireGuard(plainWGConf)
+	if err != nil {
+		t.Fatalf("ParseWireGuard: %v", err)
+	}
+	if got := cfg.DNSServers(); got != nil {
+		t.Errorf("expected nil DNS servers for a config without a DNS line, got %v", got)
+	}
+}

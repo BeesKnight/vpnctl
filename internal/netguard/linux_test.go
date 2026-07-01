@@ -199,6 +199,31 @@ func TestUpdateEndpointSwapsRulesWithoutGap(t *testing.T) {
 	}
 }
 
+func TestDNSServersForUsesProfileDNSThenFallsBack(t *testing.T) {
+	wg, err := profile.ParseWireGuard("[Interface]\nPrivateKey = x\nDNS = 9.9.9.9\n\n[Peer]\nPublicKey = y\nEndpoint = 1.2.3.4:51820\n")
+	if err != nil {
+		t.Fatalf("ParseWireGuard: %v", err)
+	}
+	withDNS := profile.Profile{Name: "has-dns", WG: wg}
+	if got := dnsServersFor(withDNS); len(got) != 1 || got[0] != "9.9.9.9" {
+		t.Errorf("expected profile's own DNS server, got %v", got)
+	}
+
+	wgNoDNS, err := profile.ParseWireGuard("[Interface]\nPrivateKey = x\n\n[Peer]\nPublicKey = y\nEndpoint = 1.2.3.4:51820\n")
+	if err != nil {
+		t.Fatalf("ParseWireGuard: %v", err)
+	}
+	withoutDNS := profile.Profile{Name: "no-dns", WG: wgNoDNS}
+	if got := dnsServersFor(withoutDNS); len(got) != len(defaultDNSServers) {
+		t.Errorf("expected default DNS servers as fallback, got %v", got)
+	}
+
+	proxyProfile := profile.Profile{Name: "vless-01", Family: profile.FamilyProxy}
+	if got := dnsServersFor(proxyProfile); len(got) != len(defaultDNSServers) {
+		t.Errorf("expected default DNS servers for a proxy profile, got %v", got)
+	}
+}
+
 func TestVLESSUsesTCP(t *testing.T) {
 	withTempHome(t)
 	p := profile.Profile{

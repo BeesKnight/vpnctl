@@ -6,8 +6,8 @@
 #
 # Downloads the vpnctl binary from GitHub Releases, installs it to
 # /usr/local/bin/vpnctl, and does the same dependency doustall the .deb's
-# postinst does (iproute2/iptables/jq via apt, sing-box from a GitHub
-# release, amneziawg-tools via apt or a source build) — fully
+# postinst does (iproute2/iptables/jq/toolchain via apt, sing-box and
+# AmneziaWG userspace from GitHub release assets or source) — fully
 # non-interactively, same as postinst.
 set -euo pipefail
 
@@ -61,17 +61,24 @@ install_vpnctl() {
   log "built vpnctl from source and installed to $BIN_DIR/vpnctl"
 }
 
-# --- 2. iproute2/iptables/jq ---
+# --- 2. ordinary apt dependencies/toolchain ---
 install_apt_deps() {
   if ! command -v apt-get >/dev/null 2>&1; then
-    log "WARNING: no apt-get found — install iproute2, iptables, jq manually for your distro"
+    log "WARNING: no apt-get found — install iproute2, iptables, jq, curl, git, go, make, gcc, and util-linux manually for your distro"
     return 0
   fi
   MISSING=""
   command -v ip >/dev/null 2>&1 || MISSING="$MISSING iproute2"
   command -v iptables >/dev/null 2>&1 || MISSING="$MISSING iptables"
   command -v jq >/dev/null 2>&1 || MISSING="$MISSING jq"
+  command -v curl >/dev/null 2>&1 || MISSING="$MISSING curl"
   command -v nsenter >/dev/null 2>&1 || MISSING="$MISSING util-linux"
+  command -v unshare >/dev/null 2>&1 || MISSING="$MISSING util-linux"
+  command -v setpriv >/dev/null 2>&1 || MISSING="$MISSING util-linux"
+  command -v git >/dev/null 2>&1 || MISSING="$MISSING git"
+  command -v go >/dev/null 2>&1 || MISSING="$MISSING golang-go"
+  command -v make >/dev/null 2>&1 || MISSING="$MISSING make"
+  command -v gcc >/dev/null 2>&1 || MISSING="$MISSING gcc"
   if [ -n "$MISSING" ]; then
     log "installing missing packages:$MISSING"
     apt-get update -qq || true
@@ -79,70 +86,147 @@ install_apt_deps() {
   fi
 }
 
-# --- 3. sing-box: latest release binary ---
+# --- 3. GitHub release asset helper ---
+latest_release_urls() {
+  repo="$1"
+  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
+    | jq -r '.assets[]?.browser_download_url' 2>/dev/null
+}
+
+asset_matches() {
+  url_lc="$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')"
+  bin_lc="$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')"
+  case "$url_lc" in
+    *"$bin_lc"*linux*"$GOARCH"*|*linux*"$GOARCH"*"$bin_lc"*|*"$bin_lc"*"$GOARCH"*linux*|*"$GOARCH"*linux*"$bin_lc"*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+install_binary_from_release() {
+  repo="$1"
+  binary="$2"
+  dest="$3"
+  urls="$(latest_release_urls "$repo" || true)"
+  url=""
+  while IFS= read -r candidate; do
+    if asset_matches "$candidate" "$binary"; then
+      url="$candidate"
+      break
+    fi
+  done <<EOF
+$urls
+EOF
+  [ -n "$url" ] || return 1
+
+  tmp="$(mktemp -d)"
+  asset="$tmp/asset"
+  if ! curl -fsSL "$url" -o "$asset" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+
+  found=""
+  case "$url" in
+    *.tar.gz|*.tgz)
+      mkdir -p "$tmp/extract"
+      tar -xzf "$asset" -C "$tmp/extract" 2>/dev/null || true
+      found="$(find "$tmp/extract" -type f -name "$binary" | head -1)"
+      ;;
+    *.tar.xz)
+      mkdir -p "$tmp/extract"
+      tar -xJf "$asset" -C "$tmp/extract" 2>/dev/null || true
+      found="$(find "$tmp/extract" -type f -name "$binary" | head -1)"
+      ;;
+    *.zip)
+      if command -v unzip >/dev/null 2>&1; then
+        mkdir -p "$tmp/extract"
+        unzip -qq "$asset" -d "$tmp/extract" 2>/dev/null || true
+        found="$(find "$tmp/extract" -type f -name "$binary" | head -1)"
+      fi
+      ;;
+    *)
+      found="$asset"
+      ;;
+  esac
+
+  if [ -n "$found" ] && install -m 0755 "$found" "$dest"; then
+    rm -rf "$tmp"
+    return 0
+  fi
+  rm -rf "$tmp"
+  return 1
+}
+
+# --- 4. sing-box: latest release binary ---
 install_singbox() {
   if command -v sing-box >/dev/null 2>&1; then
     log "sing-box already present, leaving it alone"
     return 0
   fi
-  TAG="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null \
-    | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4 || true)"
-  if [ -z "${TAG:-}" ]; then
-    log "WARNING: could not determine latest sing-box release — install manually: https://github.com/SagerNet/sing-box/releases"
-    return 0
-  fi
-  VER_NUM="${TAG#v}"
-  URL="https://github.com/SagerNet/sing-box/releases/download/${TAG}/sing-box-${VER_NUM}-linux-${GOARCH}.tar.gz"
-  TMP="$(mktemp -d)"
-  if curl -fsSL "$URL" -o "$TMP/sing-box.tar.gz" 2>/dev/null; then
-    tar -xzf "$TMP/sing-box.tar.gz" -C "$TMP"
-    BIN="$(find "$TMP" -type f -name sing-box | head -1)"
-    if [ -n "$BIN" ]; then
-      install -m 0755 "$BIN" "$BIN_DIR/sing-box"
-      log "installed sing-box $TAG to $BIN_DIR/sing-box"
-    fi
+  if install_binary_from_release "SagerNet/sing-box" "sing-box" "$BIN_DIR/sing-box"; then
+    log "installed sing-box to $BIN_DIR/sing-box"
   else
-    log "WARNING: could not download $URL — install sing-box manually"
+    log "WARNING: could not install sing-box from GitHub release assets"
   fi
-  rm -rf "$TMP"
 }
 
-# --- 4. amneziawg-tools/amneziawg-go: apt, then source build ---
-install_amneziawg() {
-  if command -v awg-quick >/dev/null 2>&1; then
-    log "awg-quick already present, leaving it alone"
+# --- 5. amneziawg-go and amneziawg-tools: release asset, then source build ---
+build_amneziawg_go() {
+  tmp="$(mktemp -d)"
+  if git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go "$tmp/amneziawg-go" >/dev/null 2>&1 \
+    && ( cd "$tmp/amneziawg-go" && make >/dev/null 2>&1 && install -m 0755 amneziawg-go "$BIN_DIR/amneziawg-go" ); then
+    rm -rf "$tmp"
     return 0
   fi
-  if command -v apt-get >/dev/null 2>&1 && apt-get install -y amneziawg-tools amneziawg-dkms >/tmp/vpnctl-awg-apt.log 2>&1; then
-    log "amneziawg-tools installed via apt"
+  rm -rf "$tmp"
+  return 1
+}
+
+build_amneziawg_tools() {
+  tmp="$(mktemp -d)"
+  if git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools "$tmp/amneziawg-tools" >/dev/null 2>&1 \
+    && ( cd "$tmp/amneziawg-tools/src" && make >/dev/null 2>&1 && make install >/dev/null 2>&1 ); then
+    rm -rf "$tmp"
     return 0
   fi
-  log "amneziawg-tools not available via apt — falling back to a source build"
-  if command -v git >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
-    TMP="$(mktemp -d)"
-    if git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go "$TMP/amneziawg-go" >/dev/null 2>&1 \
-       && git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools "$TMP/amneziawg-tools" >/dev/null 2>&1; then
-      ( cd "$TMP/amneziawg-go" && make >/dev/null 2>&1 && install -m 0755 amneziawg-go "$BIN_DIR/" ) \
-        || log "WARNING: amneziawg-go build failed"
-      ( cd "$TMP/amneziawg-tools/src" && make >/dev/null 2>&1 \
-          && install -m 0755 wg "$BIN_DIR/awg" \
-          && install -m 0755 wg-quick/wg-quick.bash "$BIN_DIR/awg-quick" ) \
-        || log "WARNING: amneziawg-tools build failed"
-      if command -v awg-quick >/dev/null 2>&1; then
-        log "amneziawg built from source and installed"
-      fi
-    else
-      log "WARNING: could not clone amneziawg source repos — plain WireGuard (wg-quick) still works for non-obfuscated profiles"
-    fi
-    rm -rf "$TMP"
-  else
-    log "WARNING: git/go/make not available — install amneziawg-tools manually for AmneziaWG obfuscation support; plain WireGuard profiles still work"
+  rm -rf "$tmp"
+  return 1
+}
+
+install_amneziawg_go() {
+  if command -v amneziawg-go >/dev/null 2>&1; then
+    log "amneziawg-go already present, leaving it alone"
+    return 0
   fi
+  if install_binary_from_release "amnezia-vpn/amneziawg-go" "amneziawg-go" "$BIN_DIR/amneziawg-go"; then
+    log "installed amneziawg-go to $BIN_DIR/amneziawg-go"
+    return 0
+  fi
+  log "amneziawg-go release binary not available, falling back to source build"
+  build_amneziawg_go || log "WARNING: amneziawg-go build failed"
+}
+
+install_amneziawg_tools() {
+  if command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
+    log "awg/awg-quick already present, leaving them alone"
+    return 0
+  fi
+  release_ok=true
+  command -v awg >/dev/null 2>&1 || install_binary_from_release "amnezia-vpn/amneziawg-tools" "awg" "$BIN_DIR/awg" || release_ok=false
+  command -v awg-quick >/dev/null 2>&1 || install_binary_from_release "amnezia-vpn/amneziawg-tools" "awg-quick" "$BIN_DIR/awg-quick" || release_ok=false
+  if [ "$release_ok" = true ] && command -v awg >/dev/null 2>&1 && command -v awg-quick >/dev/null 2>&1; then
+    log "installed amneziawg-tools from GitHub release assets"
+    return 0
+  fi
+
+  log "amneziawg-tools release binaries not available, falling back to source build"
+  build_amneziawg_tools || log "WARNING: amneziawg-tools build failed"
 }
 
 install_apt_deps
 install_singbox
-install_amneziawg
+install_amneziawg_go
+install_amneziawg_tools
 install_vpnctl
 
 log "done. Run 'vpnctl doctor' to verify your setup, then 'vpnctl use <profile>' to get started."

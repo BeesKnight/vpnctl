@@ -26,7 +26,10 @@ func cmdDoctor(args []string) error {
 	results = append(results, checkBinary("ip", "iproute2")...)
 	results = append(results, checkBinary("iptables", "iptables")...)
 	results = append(results, checkBinary("nsenter", "util-linux")...)
+	results = append(results, checkBinary("unshare", "util-linux")...)
+	results = append(results, checkBinary("setpriv", "util-linux")...)
 	results = append(results, checkBinary("jq", "jq")...)
+	results = append(results, checkBinary("curl", "curl")...)
 	results = append(results, checkEngineBinary("sing-box", "VLESS/Hysteria2 profiles")...)
 	results = append(results, checkAWG()...)
 
@@ -81,13 +84,21 @@ func checkEngineBinary(name, usedFor string) []checkResult {
 }
 
 func checkAWG() []checkResult {
-	if path, err := exec.LookPath("awg-quick"); err == nil {
-		return []checkResult{{name: "awg-quick", ok: true, info: path}}
+	check := func(name string) checkResult {
+		if path, err := exec.LookPath(name); err == nil {
+			return checkResult{name: name, ok: true, info: path}
+		}
+		return checkResult{name: name, ok: false, info: "not found — needed for AmneziaWG profiles (see README/install.sh)"}
+	}
+	results := []checkResult{
+		check("awg-quick"),
+		check("awg"),
+		check("amneziawg-go"),
 	}
 	if path, err := exec.LookPath("wg-quick"); err == nil {
-		return []checkResult{{name: "wg-quick", ok: true, info: path + " (amneziawg-tools not found — AmneziaWG obfuscation profiles won't work, plain WireGuard will)"}}
+		results = append(results, checkResult{name: "wg-quick", ok: true, info: path + " (plain WireGuard fallback)"})
 	}
-	return []checkResult{{name: "awg-quick/wg-quick", ok: false, info: "not found — needed for WireGuard/AmneziaWG profiles (see README/install.sh)"}}
+	return results
 }
 
 func rootInfo() string {

@@ -36,18 +36,72 @@ const (
 	ruleComment  = "vpnctl"
 )
 
+// defaultDNSServers back a namespace's resolv.conf when the profile doesn't
+// specify its own (proxy profiles, or a WireGuard config with no DNS line):
+// without *some* working resolver inside the namespace, hostname-based
+// commands (`vpnctl test`, `vpnctl run -- curl ...`) can't resolve anything,
+// since the kill-switch means the namespace has no route to whatever
+// resolver the host itself uses.
+var defaultDNSServers = []string{"1.1.1.1", "8.8.8.8"}
+
+// resolvConfDir/resolvConfPath follow the standard `/etc/netns/<name>/`
+// convention iproute2 itself uses for `ip netns exec` — this is what lets
+// Command's mount-namespace wrapping (see below) hand every process run
+// inside the namespace its own resolvers without ever touching the host's
+// /etc/resolv.conf, regardless of whether the host manages that file via
+// NetworkManager, systemd-resolved, plain resolvconf, or anything else.
+func resolvConfDir() string  { return "/etc/netns/" + Namespace }
+func resolvConfPath() string { return resolvConfDir() + "/resolv.conf" }
+
+// dnsServersFor picks the nameservers a profile's namespace should resolve
+// through: the WireGuard/AmneziaWG config's own DNS line when present,
+// falling back to defaultDNSServers otherwise (proxy profiles have no DNS
+// field of their own, and a WG profile may simply omit one).
+func dnsServersFor(p profile.Profile) []string {
+	if p.WG != nil {
+		if servers := p.WG.DNSServers(); len(servers) > 0 {
+			return servers
+		}
+	}
+	return defaultDNSServers
+}
+
+// writeNetnsResolvConf writes the namespace-scoped resolv.conf. This file
+// alone doesn't do anything by itself (plain `nsenter --net=` doesn't consult
+// it the way `ip netns exec` would) - Command wraps every namespace invocation
+// to bind-mount it over /etc/resolv.conf inside a private mount namespace, so
+// it's this file, not the host's, that every namespaced process resolves
+// through.
+func writeNetnsResolvConf(servers []string) error {
+	if len(servers) == 0 {
+		servers = defaultDNSServers
+	}
+	if err := os.MkdirAll(resolvConfDir(), 0o755); err != nil {
+		return err
+	}
+	var b strings.Builder
+	for _, s := range servers {
+		b.WriteString("nameserver " + s + "\n")
+	}
+	return os.WriteFile(resolvConfPath(), []byte(b.String()), 0o644)
+}
+
 // LinuxEngine is the Linux implementation of Engine: network namespaces,
 // veth pairs, and iptables, driven entirely through the Runner seam so it
 // can be exercised in dry-run mode by tests.
 type LinuxEngine struct {
 	runner Runner
+	dryRun bool
 }
 
 // NewLinuxEngine builds the Linux Engine. When dryRun is true (or
 // VPNCTL_DRY_RUN=1 is set), no command actually executes — every ip/iptables
-// invocation is only recorded, retrievable via Recorded().
+// invocation is only recorded, retrievable via Recorded() — and no real
+// filesystem changes are made outside of state under $HOME either (see
+// writeNetnsResolvConf).
 func NewLinuxEngine(dryRun bool) *LinuxEngine {
-	return &LinuxEngine{runner: NewRunner(dryRun)}
+	dryRun = dryRun || os.Getenv("VPNCTL_DRY_RUN") == "1"
+	return &LinuxEngine{runner: NewRunner(dryRun), dryRun: dryRun}
 }
 
 func (e *LinuxEngine) Recorded() []string { return e.runner.Recorded() }
@@ -80,6 +134,13 @@ func (e *LinuxEngine) Setup(p profile.Profile) (Status, error) {
 	if err := e.createNamespace(); err != nil {
 		_ = e.teardownNetwork()
 		return Status{}, fmt.Errorf("creating namespace: %w", err)
+	}
+
+	if !e.dryRun {
+		if err := writeNetnsResolvConf(dnsServersFor(p)); err != nil {
+			_ = e.teardownNetwork()
+			return Status{}, fmt.Errorf("writing namespace resolv.conf: %w", err)
+		}
 	}
 
 	if err := e.lockdownNamespace(resolvedIP, p.Port, proto); err != nil {
@@ -277,6 +338,9 @@ func (e *LinuxEngine) teardownNetwork() error {
 	// veth interfaces are paired, the host-side end with it). This is a
 	// belt-and-suspenders cleanup in case the host-side end lingered.
 	_ = e.runner.Run("ip", "link", "del", vethHost)
+	if !e.dryRun {
+		_ = os.RemoveAll(resolvConfDir())
+	}
 	return nil
 }
 
@@ -381,6 +445,25 @@ func (e *LinuxEngine) UpdateEndpoint(p profile.Profile) (bool, string, error) {
 // handle, which nsenter needs to join it.
 func netnsPath() string { return "/var/run/netns/" + Namespace }
 
+// dnsShimScript runs inside a private, per-invocation mount namespace (see
+// Command) as root, before any privilege drop: it bind-mounts the
+// namespace's own resolv.conf over /etc/resolv.conf — scoped to this one
+// process tree only, thanks to --propagation private, so it can never leak
+// back to the host's real /etc/resolv.conf no matter what manages that file
+// there (NetworkManager, systemd-resolved, plain resolvconf, ...) — then
+// drops to the requested uid/gid (if any) and execs the real target,
+// replacing itself so the PID Go already captured keeps pointing at the
+// right process throughout every exec() in this chain.
+const dnsShimScript = `r="$1"; u="$2"; g="$3"; shift 3
+if ! mount --bind "$r" /etc/resolv.conf 2>/dev/null; then
+	echo "vpnctl: could not mount namespace resolv.conf" >&2
+	exit 125
+fi
+if [ -n "$u" ]; then
+	exec setpriv --reuid "$u" --regid "$g" --clear-groups -- "$@"
+fi
+exec "$@"`
+
 // Command implements Engine. Refuses to build a command unless the
 // namespace actually exists — there is no fallback path that could run a
 // command in the host's default (unrestricted) namespace by mistake.
@@ -390,6 +473,16 @@ func netnsPath() string { return "/var/run/netns/" + Namespace }
 // cmd.Process.Pid *is* the target process's real PID. `ip netns exec` forks
 // and keeps running as a supervising parent instead, which would leave our
 // PID-based health-check/stop/ps/kill tracking pointed at the wrong process.
+//
+// Every invocation is additionally wrapped in `unshare --mount --propagation
+// private` plus a small shell shim (dnsShimScript) that bind-mounts this
+// namespace's own resolv.conf over /etc/resolv.conf before exec'ing the real
+// target — plain nsenter --net= doesn't get iproute2's /etc/netns/<name>/
+// auto-mount behavior the way `ip netns exec` does, so this replicates it by
+// hand. The uid/gid drop (opts.DropToUID/GID) happens inside the shim via
+// setpriv, *after* the bind-mount, rather than via nsenter's own
+// --setuid/--setgid: creating a mount namespace requires CAP_SYS_ADMIN, which
+// a dropped-to-uid process wouldn't have anymore.
 func (e *LinuxEngine) Command(name string, args []string, opts ExecOptions) (*exec.Cmd, error) {
 	exists, err := e.namespaceExists()
 	if err != nil {
@@ -399,15 +492,18 @@ func (e *LinuxEngine) Command(name string, args []string, opts ExecOptions) (*ex
 		return nil, fmt.Errorf("no active profile: namespace %q does not exist", Namespace)
 	}
 
-	nsenterArgs := []string{"--net=" + netnsPath()}
+	uidStr, gidStr := "", ""
 	if opts.DropToUID != nil {
-		nsenterArgs = append(nsenterArgs, fmt.Sprintf("--setuid=%d", *opts.DropToUID))
+		uidStr = strconv.Itoa(*opts.DropToUID)
 	}
 	if opts.DropToGID != nil {
-		nsenterArgs = append(nsenterArgs, fmt.Sprintf("--setgid=%d", *opts.DropToGID))
+		gidStr = strconv.Itoa(*opts.DropToGID)
 	}
-	nsenterArgs = append(nsenterArgs, "--", name)
-	nsenterArgs = append(nsenterArgs, args...)
+
+	shimArgs := append([]string{"sh", "-c", dnsShimScript, "sh", resolvConfPath(), uidStr, gidStr, name}, args...)
+
+	nsenterArgs := []string{"--net=" + netnsPath(), "--", "unshare", "--mount", "--propagation", "private", "--"}
+	nsenterArgs = append(nsenterArgs, shimArgs...)
 
 	cmd := exec.Command("nsenter", nsenterArgs...)
 	cmd.Env = append(os.Environ(), opts.Env...)

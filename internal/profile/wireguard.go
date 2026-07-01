@@ -45,6 +45,33 @@ func (p WGPeer) PortNum() int {
 	return n
 }
 
+// DNSServers returns the nameserver IPs from [Interface]'s DNS field
+// (comma-separated; some entries may be search domains rather than IPs —
+// those are skipped, since only IPs are valid `nameserver` lines). Used to
+// populate the namespace's own resolv.conf (see netguard's per-namespace
+// DNS handling) instead of ever letting awg-quick manage the *host's*
+// resolvconf/NetworkManager/systemd-resolved.
+func (c *WireGuardConfig) DNSServers() []string {
+	raw := ""
+	for k, v := range c.Interface {
+		if strings.EqualFold(k, "DNS") {
+			raw = v
+			break
+		}
+	}
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
+		if ip := net.ParseIP(part); ip != nil {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
 // WireGuardConfig is a parsed WireGuard or AmneziaWG .conf file.
 // The Raw content is preserved verbatim, since it's what actually gets
 // handed to awg-quick — the struct only exists for display/validation.

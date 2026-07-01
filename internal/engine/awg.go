@@ -29,6 +29,7 @@ type wgHandle struct {
 	ng       netguard.Engine
 	confPath string
 	logPath  string
+	kind     profile.Kind
 }
 
 func startWireGuard(ng netguard.Engine, p profile.Profile, status netguard.Status) (Handle, error) {
@@ -41,7 +42,12 @@ func startWireGuard(ng netguard.Engine, p profile.Profile, status netguard.Statu
 		return nil, err
 	}
 
-	cmd, err := ng.Command(awgQuickBinary(), []string{"up", confPath}, netguard.ExecOptions{})
+	quickBin, err := awgQuickBinary(p.Kind)
+	if err != nil {
+		return nil, err
+	}
+
+	cmd, err := ng.Command(quickBin, []string{"up", confPath}, netguard.ExecOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -58,20 +64,26 @@ func startWireGuard(ng netguard.Engine, p profile.Profile, status netguard.Statu
 	// there is no persistent foreground process to track for WireGuard, so
 	// this Run (not Start) is expected to complete quickly.
 	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("%s up: %w (see %s)", awgQuickBinary(), err, logPath)
+		return nil, fmt.Errorf("%s up: %w (see %s)", quickBin, err, logPath)
 	}
 
-	return &wgHandle{ng: ng, confPath: confPath, logPath: logPath}, nil
+	return &wgHandle{ng: ng, confPath: confPath, logPath: logPath, kind: p.Kind}, nil
 }
 
 // awgQuickBinary prefers the AmneziaWG-specific wrapper, falling back to
 // plain wg-quick when it's a non-obfuscated WireGuard profile and
 // amneziawg-tools isn't installed.
-func awgQuickBinary() string {
+func awgQuickBinary(kind profile.Kind) (string, error) {
 	if _, err := exec.LookPath("awg-quick"); err == nil {
-		return "awg-quick"
+		return "awg-quick", nil
 	}
-	return "wg-quick"
+	if kind == profile.KindAmneziaWG {
+		return "", fmt.Errorf("awg-quick not found: AmneziaWG profiles require amneziawg-tools")
+	}
+	if _, err := exec.LookPath("wg-quick"); err == nil {
+		return "wg-quick", nil
+	}
+	return "", fmt.Errorf("wg-quick not found: install amneziawg-tools or wireguard-tools")
 }
 
 // writeResolvedConf copies the profile's WireGuard config to a fixed path
@@ -95,6 +107,17 @@ func writeResolvedConf(p profile.Profile, resolvedIP string, port int) (string, 
 	return path, nil
 }
 
+// rewriteEndpoint rewrites [Peer]'s Endpoint to the pre-resolved IP (see
+// writeResolvedConf) and drops [Interface]'s DNS line entirely. DNS is never
+// left for awg-quick to manage: awg-quick's set_dns() shells out to
+// `resolvconf`, which fights NetworkManager/systemd-resolved (whichever one
+// happens to own /etc/resolv.conf on the host) for write access to the
+// host's file — exactly the kind of host-touching side effect the netns
+// isolation model exists to avoid. Dropping the DNS line makes set_dns() a
+// no-op (its $DNS array ends up empty); the namespace gets its own
+// resolvers via netguard's /etc/netns/<namespace>/resolv.conf instead,
+// which every command run inside the namespace picks up without any
+// resolvconf tooling on the host at all.
 func rewriteEndpoint(raw, resolvedIP string, port int) (string, error) {
 	var out strings.Builder
 	section := ""
@@ -107,6 +130,12 @@ func rewriteEndpoint(raw, resolvedIP string, port int) (string, error) {
 			section = strings.ToLower(strings.TrimSuffix(strings.TrimPrefix(trimmed, "["), "]"))
 			out.WriteString(line + "\n")
 			continue
+		}
+		if section == "interface" {
+			idx := strings.Index(trimmed, "=")
+			if idx >= 0 && strings.EqualFold(strings.TrimSpace(trimmed[:idx]), "DNS") {
+				continue
+			}
 		}
 		if section == "peer" {
 			idx := strings.Index(trimmed, "=")
@@ -163,12 +192,12 @@ func wgHandshakeHealthy(ng netguard.Engine) (bool, error) {
 	return time.Since(time.Unix(unixSecs, 0)) < handshakeStaleAfter, nil
 }
 
-func (h *wgHandle) Stop() error { return stopWireGuard(h.ng) }
+func (h *wgHandle) Stop() error { return stopWireGuard(h.ng, h.kind) }
 
 // stopWireGuard brings the interface down by its well-known config path
 // rather than anything held in memory, so it works even when called from a
 // process other than the one that brought it up (e.g. a later `vpnctl down`).
-func stopWireGuard(ng netguard.Engine) error {
+func stopWireGuard(ng netguard.Engine, kind profile.Kind) error {
 	dir, err := netguard.StateDir()
 	if err != nil {
 		return err
@@ -177,7 +206,11 @@ func stopWireGuard(ng netguard.Engine) error {
 	if _, err := os.Stat(confPath); os.IsNotExist(err) {
 		return nil
 	}
-	cmd, err := ng.Command(awgQuickBinary(), []string{"down", confPath}, netguard.ExecOptions{})
+	quickBin, err := awgQuickBinary(kind)
+	if err != nil {
+		return err
+	}
+	cmd, err := ng.Command(quickBin, []string{"down", confPath}, netguard.ExecOptions{})
 	if err != nil {
 		return err
 	}

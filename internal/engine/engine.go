@@ -62,7 +62,7 @@ func Start(ng netguard.Engine, p profile.Profile) (Handle, error) {
 func Stop(ng netguard.Engine, state *netguard.ActiveState) error {
 	switch profile.Kind(state.ProfileKind) {
 	case profile.KindWireGuard, profile.KindAmneziaWG:
-		return stopWireGuard(ng)
+		return stopWireGuard(ng, profile.Kind(state.ProfileKind))
 	default:
 		return stopByPID(state.EnginePID)
 	}

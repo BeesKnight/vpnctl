@@ -41,8 +41,9 @@ proxy setting an app might ignore.
 
 - Linux with network namespace support (`ip netns`), root/`sudo` for every
   network-affecting command.
-- `iproute2` (`ip`, `nsenter`), `iptables`, `jq`.
-- `awg-quick` (from `amneziawg-tools`) or plain `wg-quick` for WireGuard/
+- `iproute2` (`ip`), `util-linux` (`nsenter`, `unshare`, `setpriv`),
+  `iptables`, `jq`, `curl`.
+- `awg-quick` and `awg` (from `amneziawg-tools`) plus `amneziawg-go` for
   AmneziaWG profiles.
 - `sing-box` for VLESS/Hysteria2 profiles.
 
@@ -54,16 +55,17 @@ missing.
 ### Option A — `.deb` package (recommended on Kali/Debian)
 
 ```bash
-sudo dpkg -i vpnctl_0.1.0_amd64.deb
+sudo apt install ./vpnctl_1.0.1_amd64.deb
 ```
 
-The package's `postinst` script installs `iproute2`/`iptables`/`jq` (via
-apt, as ordinary dependencies) and does its best to get you `sing-box` and
-`amneziawg-tools` too — downloading a matching release binary where
-possible, falling back to a source build for AmneziaWG if no packaged/
-release binary exists for your architecture. Nothing is interactive; any
-failure is printed, not blocked on a debconf prompt. Run `vpnctl doctor`
-afterwards to confirm everything landed.
+Use `apt install ./...`, not `dpkg -i`: apt resolves the package's ordinary
+Debian/Kali dependencies before `postinst` runs. `postinst` never calls
+`apt-get` itself; it only handles upstream components that are usually not in
+the base repos (`sing-box`, `amneziawg-tools`, `amneziawg-go`) by downloading a
+matching GitHub release asset where possible, then falling back to the official
+source builds for AmneziaWG. Nothing is interactive; any failure is printed,
+not blocked on a debconf prompt. Run `vpnctl doctor` afterwards to confirm
+everything landed.
 
 Removing the package is symmetric:
 
@@ -81,9 +83,9 @@ sudo apt purge vpnctl     # also deletes ~/.config/vpnctl, and removes any
 curl -fsSL https://raw.githubusercontent.com/BeesKnight/vpnctl/main/packaging/install.sh | sudo bash
 ```
 
-Same dependency doustall as the `.deb`'s `postinst`, plus it fetches the
-`vpnctl` binary itself from GitHub Releases (falling back to `go build` from
-source if no release exists yet) and drops it at `/usr/local/bin/vpnctl`.
+Same dependency install logic as the `.deb`, plus it fetches the `vpnctl`
+binary itself from GitHub Releases (falling back to `go build` from source if
+no release exists yet) and drops it at `/usr/local/bin/vpnctl`.
 
 ### Building from source
 
