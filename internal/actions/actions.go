@@ -123,13 +123,7 @@ func TestConnectivity() (TestResult, error) {
 		return TestResult{}, fmt.Errorf("no active profile — activate one first")
 	}
 
-	curlArgs := []string{"-s", "-S", "--max-time", "10", "-w", "\nhttp_status=%{http_code} time=%{time_total}s\n"}
-	switch profile.Kind(status.ProfileKind) {
-	case profile.KindVLESS, profile.KindHysteria2:
-		curlArgs = append(curlArgs, "--socks5-hostname",
-			fmt.Sprintf("%s:%d", netguard.NamespaceIP, engine.SOCKSPort))
-	}
-	curlArgs = append(curlArgs, "https://ifconfig.me/ip")
+	curlArgs := []string{"-s", "-S", "--max-time", "10", "-w", "\nhttp_status=%{http_code} time=%{time_total}s\n", "https://ifconfig.me/ip"}
 
 	start := time.Now()
 	code, err := run.CLI(ng, append([]string{"curl"}, curlArgs...))

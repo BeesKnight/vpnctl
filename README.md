@@ -156,15 +156,12 @@ apps:
 
 ## Design notes / known limitations
 
-- **VLESS/Hysteria2 profiles are SOCKS5, not transparent.** `sing-box`
-  exposes a SOCKS5 inbound on the namespace's internal IP
-  (`10.200.200.2:1080`); programs must be SOCKS5-aware (`curl --socks5`,
-  a browser's proxy settings, `proxychains`, ...) to actually get anywhere
-  through a proxy profile. WireGuard/AmneziaWG profiles route transparently
-  (the namespace's default route is the WG interface itself), so this
-  distinction only applies to VLESS/Hysteria2. Either way, anything that
-  _isn't_ going through the permitted path is dropped by the kill-switch —
-  the failure mode is "no connectivity," never "accidental leak."
+- **All profile families are transparent tunnels.** WireGuard/AmneziaWG uses
+  its kernel/userspace WireGuard interface; VLESS/Hysteria2 uses sing-box's
+  TUN inbound (`vpnctl-tun`). Programs launched through `vpnctl run` or the
+  Apps panel do not need SOCKS5/HTTP proxy settings. If the tunnel engine is
+  down, the namespace's default-DROP kill-switch leaves them with no route
+  rather than a direct connection.
 - **Switching profiles while something is running is refused, not forced.**
   If `vpnctl ps` shows tracked processes, `vpnctl use <other>` errors out
   instead of silently killing them — stop them with `vpnctl kill` first.

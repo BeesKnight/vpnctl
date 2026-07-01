@@ -24,6 +24,11 @@ import (
 const Namespace = "vpnctl0"
 
 const (
+	WireGuardInterface  = "vpnctl-wg"
+	SingBoxTunInterface = "vpnctl-tun"
+	SingBoxTunAddress   = "172.19.0.1/30"
+	SingBoxTunDNS       = "172.19.0.2"
+
 	vethHost   = "vpnctl-h0"
 	vethNS     = "vpnctl-n0"
 	hostIP     = HostIP
@@ -54,14 +59,18 @@ func resolvConfDir() string  { return "/etc/netns/" + Namespace }
 func resolvConfPath() string { return resolvConfDir() + "/resolv.conf" }
 
 // dnsServersFor picks the nameservers a profile's namespace should resolve
-// through: the WireGuard/AmneziaWG config's own DNS line when present,
-// falling back to defaultDNSServers otherwise (proxy profiles have no DNS
-// field of their own, and a WG profile may simply omit one).
+// through. WireGuard/AmneziaWG uses the profile's own DNS line when present.
+// sing-box TUN profiles point libc at the TUN-side DNS address; sing-box then
+// hijacks those DNS packets and sends upstream queries through proxy-out.
 func dnsServersFor(p profile.Profile) []string {
 	if p.WG != nil {
 		if servers := p.WG.DNSServers(); len(servers) > 0 {
 			return servers
 		}
+	}
+	switch p.Kind {
+	case profile.KindVLESS, profile.KindHysteria2:
+		return []string{SingBoxTunDNS}
 	}
 	return defaultDNSServers
 }
@@ -143,7 +152,7 @@ func (e *LinuxEngine) Setup(p profile.Profile) (Status, error) {
 		}
 	}
 
-	if err := e.lockdownNamespace(resolvedIP, p.Port, proto); err != nil {
+	if err := e.lockdownNamespace(p.Kind, resolvedIP, p.Port, proto); err != nil {
 		_ = e.teardownNetwork()
 		return Status{}, fmt.Errorf("applying kill-switch: %w", err)
 	}
@@ -217,7 +226,7 @@ func (e *LinuxEngine) createNamespace() error {
 // namespace, with a single point-to-point ACCEPT for the profile's resolved
 // server IP:port — this is the fail-closed guarantee from spec §5: nothing
 // else can ever leave the namespace, on purpose or by engine failure.
-func (e *LinuxEngine) lockdownNamespace(serverIP string, port int, proto string) error {
+func (e *LinuxEngine) lockdownNamespace(kind profile.Kind, serverIP string, port int, proto string) error {
 	run := func(args ...string) error { return e.nsExecRun("iptables", args...) }
 
 	if err := run("-F"); err != nil {
@@ -243,6 +252,16 @@ func (e *LinuxEngine) lockdownNamespace(serverIP string, port int, proto string)
 	}
 	if err := run("-A", "OUTPUT", "-m", "state", "--state", "ESTABLISHED,RELATED", "-j", "ACCEPT"); err != nil {
 		return err
+	}
+	switch kind {
+	case profile.KindWireGuard, profile.KindAmneziaWG:
+		if err := run("-A", "OUTPUT", "-o", WireGuardInterface, "-j", "ACCEPT"); err != nil {
+			return err
+		}
+	case profile.KindVLESS, profile.KindHysteria2:
+		if err := run("-A", "OUTPUT", "-o", SingBoxTunInterface, "-j", "ACCEPT"); err != nil {
+			return err
+		}
 	}
 	portStr := strconv.Itoa(port)
 	if err := run("-A", "OUTPUT", "-p", proto, "-d", serverIP, "--dport", portStr, "-j", "ACCEPT"); err != nil {

@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 
@@ -10,19 +11,7 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/profile"
 )
 
-// SOCKSPort is the fixed SOCKS5 port sing-box listens on inside the
-// namespace, per spec §3.3. Client applications (or `vpnctl test`) must
-// point their SOCKS5 settings at netguard.NamespaceIP:SOCKSPort — sing-box
-// only exposes a proxy inbound here, not a transparent TUN, so unlike
-// WireGuard/AmneziaWG (a real interface with its own default route) a
-// launched CLI/GUI/TUI program only actually goes through the tunnel if it
-// is itself SOCKS5-aware (curl --socks5, browser proxy settings, etc). This
-// is a deliberate scope decision matching the spec's literal wording
-// ("SOCKS5-inbound слушает на internal IP"); anything that isn't proxy-aware
-// still can't leak, since the namespace's iptables only permits traffic to
-// the resolved server IP/port — it just won't get anywhere either, which is
-// the correct fail-closed behavior.
-const SOCKSPort = 1080
+const dnsServerTag = "remote-dns"
 
 type singBoxHandle struct {
 	proc    *os.Process
@@ -74,20 +63,45 @@ func writeSingBoxConfig(p profile.Profile, resolvedIP string, port int) (string,
 
 	cfg := map[string]any{
 		"log": map[string]any{"level": "info", "timestamp": true},
+		"dns": map[string]any{
+			"servers": []map[string]any{
+				{
+					"type":   "udp",
+					"tag":    dnsServerTag,
+					"server": "1.1.1.1",
+					"detour": "proxy-out",
+				},
+			},
+			"final":    dnsServerTag,
+			"strategy": "prefer_ipv4",
+		},
 		"inbounds": []map[string]any{
 			{
-				"type":        "socks",
-				"tag":         "socks-in",
-				"listen":      netguard.NamespaceIP,
-				"listen_port": SOCKSPort,
-				"sniff":       true,
+				"type":           "tun",
+				"tag":            "tun-in",
+				"interface_name": netguard.SingBoxTunInterface,
+				"address":        []string{netguard.SingBoxTunAddress},
+				"auto_route":     true,
+				"strict_route":   true,
+				"route_exclude_address": []string{
+					routeExcludeAddress(resolvedIP),
+				},
+				"stack": "system",
+				"sniff": true,
 			},
 		},
 		"outbounds": []map[string]any{
 			outbound,
+			{"type": "dns", "tag": "dns-out"},
 			{"type": "direct", "tag": "direct-out"},
 		},
-		"route": map[string]any{"final": "proxy-out"},
+		"route": map[string]any{
+			"rules": []map[string]any{
+				{"protocol": "dns", "action": "hijack-dns"},
+			},
+			"final":                 "proxy-out",
+			"auto_detect_interface": false,
+		},
 	}
 
 	data, err := json.MarshalIndent(cfg, "", "  ")
@@ -104,6 +118,13 @@ func writeSingBoxConfig(p profile.Profile, resolvedIP string, port int) (string,
 		return "", err
 	}
 	return path, nil
+}
+
+func routeExcludeAddress(ip string) string {
+	if parsed := net.ParseIP(ip); parsed != nil && parsed.To4() == nil {
+		return ip + "/128"
+	}
+	return ip + "/32"
 }
 
 func (h *singBoxHandle) Healthy() (bool, error) { return pidAlive(h.PID()), nil }

@@ -63,6 +63,7 @@ func TestSetupDryRunGeneratesKillSwitch(t *testing.T) {
 		"iptables -P INPUT DROP",
 		"iptables -P OUTPUT DROP",
 		"iptables -P FORWARD DROP",
+		"-A OUTPUT -o vpnctl-wg -j ACCEPT",
 		"-A OUTPUT -p udp -d 185.130.44.10 --dport 51820 -j ACCEPT",
 		"-A INPUT -p udp -s 185.130.44.10 --sport 51820 -j ACCEPT",
 		"nat -A POSTROUTING -s 10.200.200.0/24 -d 185.130.44.10 -j MASQUERADE",
@@ -218,9 +219,9 @@ func TestDNSServersForUsesProfileDNSThenFallsBack(t *testing.T) {
 		t.Errorf("expected default DNS servers as fallback, got %v", got)
 	}
 
-	proxyProfile := profile.Profile{Name: "vless-01", Family: profile.FamilyProxy}
-	if got := dnsServersFor(proxyProfile); len(got) != len(defaultDNSServers) {
-		t.Errorf("expected default DNS servers for a proxy profile, got %v", got)
+	proxyProfile := profile.Profile{Name: "vless-01", Family: profile.FamilyProxy, Kind: profile.KindVLESS}
+	if got := dnsServersFor(proxyProfile); len(got) != 1 || got[0] != SingBoxTunDNS {
+		t.Errorf("expected sing-box TUN DNS for a proxy profile, got %v", got)
 	}
 }
 
@@ -240,6 +241,12 @@ func TestVLESSUsesTCP(t *testing.T) {
 	}
 	if status.Protocol != "tcp" {
 		t.Fatalf("expected tcp for VLESS, got %s", status.Protocol)
+	}
+	if !containsCmd(e.Recorded(), "-A OUTPUT -o vpnctl-tun -j ACCEPT") {
+		t.Fatalf("expected VLESS kill-switch to allow output through vpnctl-tun, got:\n%s", strings.Join(e.Recorded(), "\n"))
+	}
+	if containsCmd(e.Recorded(), "-A OUTPUT -o vpnctl-wg -j ACCEPT") {
+		t.Fatalf("did not expect VLESS kill-switch to add WireGuard interface rule, got:\n%s", strings.Join(e.Recorded(), "\n"))
 	}
 }
 

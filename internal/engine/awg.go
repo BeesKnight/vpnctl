@@ -18,7 +18,7 @@ import (
 // AmneziaWG profile it brings up. Only one profile is ever active at a time
 // (see netguard.Namespace), so there is never a need to derive a unique name
 // per profile — a fixed name keeps health-check/stop logic trivial.
-const wgInterface = "vpnctl-wg"
+const wgInterface = netguard.WireGuardInterface
 
 // handshakeStaleAfter is how old a WireGuard handshake can get before the
 // tunnel is considered unhealthy. Keepalive is typically 25s, so this is

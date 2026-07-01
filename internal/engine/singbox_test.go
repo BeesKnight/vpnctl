@@ -69,8 +69,42 @@ func TestWriteSingBoxConfigPreservesOutboundFieldsAndOverridesServer(t *testing.
 	if !ok || len(inbounds) != 1 {
 		t.Fatalf("expected exactly one inbound, got %v", cfg["inbounds"])
 	}
-	socksIn := inbounds[0].(map[string]any)
-	if socksIn["listen"] != "10.200.200.2" {
-		t.Errorf("expected socks inbound to listen on the namespace's internal IP, got %v", socksIn["listen"])
+	tunIn := inbounds[0].(map[string]any)
+	if tunIn["type"] != "tun" {
+		t.Errorf("expected TUN inbound, got %v", tunIn["type"])
+	}
+	if tunIn["interface_name"] != "vpnctl-tun" {
+		t.Errorf("expected fixed TUN interface name, got %v", tunIn["interface_name"])
+	}
+	if got := tunIn["address"]; got == nil {
+		t.Fatal("expected TUN address to be set")
+	}
+	if tunIn["auto_route"] != true || tunIn["strict_route"] != true {
+		t.Errorf("expected auto_route and strict_route enabled, got auto_route=%v strict_route=%v", tunIn["auto_route"], tunIn["strict_route"])
+	}
+	excludes, ok := tunIn["route_exclude_address"].([]any)
+	if !ok || len(excludes) != 1 || excludes[0] != "185.220.10.5/32" {
+		t.Errorf("expected resolved server IP to be excluded from TUN routes, got %v", tunIn["route_exclude_address"])
+	}
+
+	dns, ok := cfg["dns"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected dns section, got %v", cfg["dns"])
+	}
+	servers, ok := dns["servers"].([]any)
+	if !ok || len(servers) != 1 {
+		t.Fatalf("expected one DNS server, got %v", dns["servers"])
+	}
+	remoteDNS := servers[0].(map[string]any)
+	if remoteDNS["detour"] != "proxy-out" {
+		t.Errorf("expected DNS server to detour through proxy-out, got %v", remoteDNS["detour"])
+	}
+
+	route, ok := cfg["route"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected route section, got %v", cfg["route"])
+	}
+	if route["auto_detect_interface"] != false {
+		t.Errorf("expected auto_detect_interface=false, got %v", route["auto_detect_interface"])
 	}
 }
