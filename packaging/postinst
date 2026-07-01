@@ -1,0 +1,107 @@
+#!/bin/bash
+# vpnctl postinst — spec §2.1/§2.2: doustall whatever apt couldn't (sing-box,
+# amneziawg-tools), fully non-interactively (no debconf, no prompts —
+# failures are just printed, never block `dpkg -i`). iproute2/iptables/jq
+# are ordinary apt dependencies, so dpkg already installed those before this
+# script ever runs.
+#
+# Deliberately does NOT create ~/.config/vpnctl or ~/.local/state/vpnctl
+# here: this script runs as root, but those directories must be owned by
+# the real user, so vpnctl creates them itself on first invocation
+# (internal/profile.EnsureDirs / internal/netguard.EnsureStateDir).
+set -u
+
+STATE_DIR="/var/lib/vpnctl"
+DEPS_FILE="$STATE_DIR/installed_by_vpnctl.json"
+mkdir -p "$STATE_DIR"
+
+log() { echo "vpnctl postinst: $*"; }
+
+ARCH="$(dpkg --print-architecture 2>/dev/null || uname -m)"
+case "$ARCH" in
+  amd64|x86_64) NORM_ARCH="amd64" ;;
+  arm64|aarch64) NORM_ARCH="arm64" ;;
+  *) NORM_ARCH="" ;;
+esac
+
+installed_singbox=false
+installed_awg=false
+
+# --- sing-box: download the latest release binary (spec §2.1 priority: a
+# ready-made binary over building from source) ---
+if command -v sing-box >/dev/null 2>&1; then
+  log "sing-box already present ($(command -v sing-box)), leaving it alone"
+elif [ -z "$NORM_ARCH" ]; then
+  log "WARNING: unrecognized architecture '$ARCH' — install sing-box manually: https://github.com/SagerNet/sing-box/releases"
+else
+  log "installing sing-box from GitHub releases..."
+  TAG="$(curl -fsSL https://api.github.com/repos/SagerNet/sing-box/releases/latest 2>/dev/null \
+    | grep -o '"tag_name": *"[^"]*"' | head -1 | cut -d'"' -f4)"
+  if [ -n "${TAG:-}" ]; then
+    VER_NUM="${TAG#v}"
+    URL="https://github.com/SagerNet/sing-box/releases/download/${TAG}/sing-box-${VER_NUM}-linux-${NORM_ARCH}.tar.gz"
+    TMP="$(mktemp -d)"
+    if curl -fsSL "$URL" -o "$TMP/sing-box.tar.gz" 2>/dev/null; then
+      tar -xzf "$TMP/sing-box.tar.gz" -C "$TMP" 2>/dev/null
+      BIN="$(find "$TMP" -type f -name sing-box | head -1)"
+      if [ -n "$BIN" ]; then
+        install -m 0755 "$BIN" /usr/local/bin/sing-box
+        installed_singbox=true
+        log "sing-box $TAG installed to /usr/local/bin/sing-box"
+      else
+        log "WARNING: sing-box archive didn't contain the expected binary"
+      fi
+    else
+      log "WARNING: could not download $URL — install sing-box manually"
+    fi
+    rm -rf "$TMP"
+  else
+    log "WARNING: could not determine the latest sing-box release — install manually: https://github.com/SagerNet/sing-box/releases"
+  fi
+fi
+
+# --- amneziawg-tools / amneziawg-go: apt first, then a release binary,
+# then build from source as a last resort (spec §2.1's stated priority
+# order) ---
+if command -v awg-quick >/dev/null 2>&1; then
+  log "awg-quick already present ($(command -v awg-quick)), leaving it alone"
+elif apt-get install -y amneziawg-tools amneziawg-dkms >/tmp/vpnctl-awg-apt.log 2>&1; then
+  installed_awg=true
+  log "amneziawg-tools installed via apt"
+else
+  log "amneziawg-tools not available via apt on this system (see /tmp/vpnctl-awg-apt.log)"
+  log "falling back to building amneziawg-go/amneziawg-tools from source..."
+  if command -v git >/dev/null 2>&1 && command -v go >/dev/null 2>&1 && command -v make >/dev/null 2>&1; then
+    TMP="$(mktemp -d)"
+    ok=true
+    git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go "$TMP/amneziawg-go" >/dev/null 2>&1 || ok=false
+    git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-tools "$TMP/amneziawg-tools" >/dev/null 2>&1 || ok=false
+    if [ "$ok" = true ]; then
+      ( cd "$TMP/amneziawg-go" && make >/dev/null 2>&1 && install -m 0755 amneziawg-go /usr/local/bin/ ) || log "WARNING: amneziawg-go build failed"
+      ( cd "$TMP/amneziawg-tools/src" && make >/dev/null 2>&1 \
+          && install -m 0755 wg /usr/local/bin/awg \
+          && install -m 0755 wg-quick/wg-quick.bash /usr/local/bin/awg-quick ) \
+        || log "WARNING: amneziawg-tools build failed"
+      if command -v awg-quick >/dev/null 2>&1; then
+        installed_awg=true
+        log "amneziawg built from source and installed"
+      fi
+    else
+      log "WARNING: could not clone amneziawg source repos — plain WireGuard (wg-quick) still works for non-obfuscated profiles"
+    fi
+    rm -rf "$TMP"
+  else
+    log "WARNING: git/go/make not available for a source build — install amneziawg-tools manually for AmneziaWG obfuscation support; plain WireGuard profiles still work via wg-quick"
+  fi
+fi
+
+cat > "$DEPS_FILE" <<EOF
+{
+  "sing_box": $installed_singbox,
+  "amneziawg": $installed_awg
+}
+EOF
+log "dependency install record: $DEPS_FILE"
+
+log "done. Run 'vpnctl doctor' to verify your setup, then 'vpnctl use <profile>' to get started."
+exit 0

@@ -1,0 +1,48 @@
+# nfpm config for vpnctl's .deb package (spec §2.1/§2.2).
+#
+# Build with:
+#   go build -o packaging/vpnctl ./cmd/vpnctl
+#   nfpm package --config packaging/nfpm.yaml --target vpnctl_0.1.0_amd64.deb --packager deb
+#
+# Bump `version:` below for each release (this nfpm version has no
+# --version/--arch package-command override, so it has to live here).
+name: vpnctl
+arch: amd64
+platform: linux
+version: 0.1.0
+maintainer: "vpnctl maintainers <shterenfeld151@gmail.com>"
+homepage: https://github.com/BeesKnight/vpnctl
+license: MIT
+section: net
+priority: optional
+description: |
+  Interactive TUI/CLI for switching between WireGuard/AmneziaWG and
+  VLESS/Hysteria2 VPN/proxy profiles with a kernel-level (netns + iptables)
+  kill-switch, and a launcher for running GUI/CLI/TUI programs through
+  whichever profile is active.
+
+# iproute2/iptables/jq are ordinary apt packages, so dpkg's own dependency
+# resolution installs them before postinst ever runs — postinst only has to
+# handle sing-box and amneziawg-tools, which aren't in most base repos.
+depends:
+  - iproute2
+  - iptables
+  - jq
+
+contents:
+  - src: ./vpnctl
+    dst: /usr/local/bin/vpnctl
+    file_info:
+      mode: 0755
+  - src: ../README.md
+    dst: /usr/share/doc/vpnctl/README.md
+    file_info:
+      mode: 0644
+
+scripts:
+  postinstall: ./postinst
+  preremove: ./prerm
+  postremove: ./postrm
+
+deb:
+  compression: xz

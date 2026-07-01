@@ -1,0 +1,37 @@
+#!/bin/bash
+# vpnctl prerm — runs before the binary is removed (both `apt remove` and
+# `apt purge`). Gracefully tears down any active profile first: `vpnctl
+# down` already does the full idempotent job (namespace/iptables teardown,
+# sysctl restore from its own backup, killing tracked engine/health-check/
+# run processes by PID) for whichever real user has it active — this script
+# just needs to find that user and set $SUDO_USER so vpnctl's own
+# real-user resolution (internal/sysuser) points at the right home
+# directory instead of root's.
+set -u
+
+if ! command -v vpnctl >/dev/null 2>&1; then
+  exit 0
+fi
+
+teardown_for() {
+  user="$1"
+  state_dir="$2"
+  [ -f "$state_dir/active.json" ] || return 0
+  echo "vpnctl prerm: tearing down active profile for $user..."
+  if [ "$user" = "root" ]; then
+    vpnctl down || echo "vpnctl prerm: WARNING: teardown for root failed, continuing removal anyway"
+  else
+    SUDO_USER="$user" vpnctl down || echo "vpnctl prerm: WARNING: teardown for $user failed, continuing removal anyway"
+  fi
+}
+
+[ -d /root/.local/state/vpnctl ] && teardown_for root /root/.local/state/vpnctl
+
+for state_dir in /home/*/.local/state/vpnctl; do
+  [ -d "$state_dir" ] || continue
+  rest="${state_dir#/home/}"
+  user="${rest%%/*}"
+  teardown_for "$user" "$state_dir"
+done
+
+exit 0

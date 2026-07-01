@@ -1,0 +1,70 @@
+#!/bin/bash
+# vpnctl postrm — spec §2.2's remove-vs-purge split, standard Debian
+# convention: `apt remove` (arg "remove") keeps user profiles, `apt purge`
+# (arg "purge") removes everything vpnctl ever created, including
+# dependencies it installed itself (never ones that were already present —
+# see postinst's installed_by_vpnctl.json).
+#
+# By the time this runs, prerm has already called `vpnctl down` for every
+# user with an active profile, which tears down the namespace/iptables and
+# restores sysctl from its own backup — so there is nothing network-related
+# left to clean up here, only files.
+set -u
+
+STATE_DIR="/var/lib/vpnctl"
+DEPS_FILE="$STATE_DIR/installed_by_vpnctl.json"
+
+remove_state_dirs() {
+  [ -d /root/.local/state/vpnctl ] && rm -rf /root/.local/state/vpnctl
+  for d in /home/*/.local/state/vpnctl; do
+    [ -d "$d" ] && rm -rf "$d"
+  done
+}
+
+remove_config_dirs() {
+  [ -d /root/.config/vpnctl ] && rm -rf /root/.config/vpnctl
+  for d in /home/*/.config/vpnctl; do
+    [ -d "$d" ] && rm -rf "$d"
+  done
+}
+
+remove_installed_deps() {
+  [ -f "$DEPS_FILE" ] || return 0
+  installed_singbox="false"
+  installed_awg="false"
+  if command -v jq >/dev/null 2>&1; then
+    installed_singbox="$(jq -r '.sing_box // false' "$DEPS_FILE" 2>/dev/null || echo false)"
+    installed_awg="$(jq -r '.amneziawg // false' "$DEPS_FILE" 2>/dev/null || echo false)"
+  else
+    grep -q '"sing_box": *true' "$DEPS_FILE" && installed_singbox="true"
+    grep -q '"amneziawg": *true' "$DEPS_FILE" && installed_awg="true"
+  fi
+
+  if [ "$installed_singbox" = "true" ]; then
+    echo "vpnctl postrm: removing sing-box (installed by vpnctl)"
+    rm -f /usr/local/bin/sing-box
+  fi
+  if [ "$installed_awg" = "true" ]; then
+    echo "vpnctl postrm: removing amneziawg-tools/amneziawg-go (installed by vpnctl)"
+    rm -f /usr/local/bin/awg-quick /usr/local/bin/awg /usr/local/bin/amneziawg-go
+  fi
+}
+
+case "${1:-}" in
+  remove)
+    # Ephemeral runtime state is always cleared; user profiles are not
+    # touched — that's the whole point of `remove` vs `purge`.
+    remove_state_dirs
+    ;;
+  purge)
+    remove_state_dirs
+    remove_config_dirs
+    remove_installed_deps
+    rm -rf "$STATE_DIR"
+    ;;
+  *)
+    # upgrade/failed-upgrade/etc: nothing to do
+    ;;
+esac
+
+exit 0
