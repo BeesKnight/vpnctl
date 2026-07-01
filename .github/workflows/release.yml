@@ -1,0 +1,103 @@
+name: Release
+
+# Builds vpnctl and packages it as a .deb (via nfpm — no Debian toolchain
+# needed) for amd64 and arm64, then attaches everything to a GitHub Release.
+#
+# Trigger a release by pushing a tag:
+#   git tag v1.0.0 && git push origin v1.0.0
+#
+# `workflow_dispatch` builds the same artifacts on demand (e.g. to sanity
+# check a branch) without creating a release — useful before cutting a tag.
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version to build (no leading v), e.g. 1.0.0"
+        required: false
+        default: "0.0.0-dev"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        arch: [amd64, arm64]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Run tests
+        run: go test ./...
+
+      - name: Build vpnctl binary (linux/${{ matrix.arch }})
+        env:
+          GOOS: linux
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: 0
+        run: |
+          go build -trimpath -ldflags "-s -w" -o packaging/vpnctl ./cmd/vpnctl
+          cp packaging/vpnctl "vpnctl_${{ steps.version.outputs.version }}_linux_${{ matrix.arch }}"
+
+      - name: Install nfpm
+        run: go install github.com/goreleaser/nfpm/v2/cmd/nfpm@latest
+
+      - name: Build .deb package
+        # nfpm resolves `contents[].src` paths relative to the current
+        # working directory, not the config file's location — so this must
+        # run from packaging/, matching nfpm.yaml's own src paths
+        # (./vpnctl, ../README.md).
+        run: |
+          sed -i "s/^version: .*/version: ${{ steps.version.outputs.version }}/" packaging/nfpm.yaml
+          sed -i "s/^arch: .*/arch: ${{ matrix.arch }}/" packaging/nfpm.yaml
+          cd packaging
+          "$(go env GOPATH)/bin/nfpm" package \
+            --config nfpm.yaml \
+            --packager deb \
+            --target "../vpnctl_${{ steps.version.outputs.version }}_${{ matrix.arch }}.deb"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vpnctl-${{ matrix.arch }}
+          path: |
+            vpnctl_*_linux_${{ matrix.arch }}
+            vpnctl_*_${{ matrix.arch }}.deb
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    steps:
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create/update GitHub Release with artifacts attached
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
