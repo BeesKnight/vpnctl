@@ -150,6 +150,46 @@ func TestWriteXrayConfigXHTTPTransport(t *testing.T) {
 	}
 }
 
+func TestWriteXrayConfigTopLevelDNS(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("SUDO_USER", "")
+
+	p := profile.Profile{
+		Name: "dns-check",
+		Kind: profile.KindVLESS,
+		Outbound: map[string]any{
+			"type":   "vless",
+			"server": "vless.example.com",
+			"uuid":   "b831381d-6324-4d53-ad4f-8cda48b30811",
+		},
+	}
+
+	path, err := writeXrayConfig(p, "185.220.10.5", 443)
+	if err != nil {
+		t.Fatalf("writeXrayConfig: %v", err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading generated config: %v", err)
+	}
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("generated config is not valid JSON: %v", err)
+	}
+
+	// Without a top-level dns block, Xray-core's own internal resolves fall
+	// back to the OS resolver inside the netns, which loops back into Xray's
+	// own TUN interface (via tun2socks's default route) and times out.
+	dns, ok := cfg["dns"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected top-level dns block, got %v", cfg["dns"])
+	}
+	servers, ok := dns["servers"].([]any)
+	if !ok || len(servers) != 1 || servers[0] != "1.1.1.1" {
+		t.Errorf("expected dns.servers to contain 1.1.1.1, got %v", dns["servers"])
+	}
+}
+
 func TestWriteXrayConfigRealityAndWS(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SUDO_USER", "")

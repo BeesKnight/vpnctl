@@ -126,7 +126,10 @@ func tunPostUpCommand() string {
 // loopback-only SOCKS5 inbound for tun2socks to hand traffic to, the VLESS
 // outbound itself, and a `dns` outbound so locally-hijacked port-53 traffic
 // resolves through the tunnel rather than leaking — the direct Xray-core
-// equivalent of sing-box's `hijack-dns` route action.
+// equivalent of sing-box's `hijack-dns` route action. The top-level `dns`
+// block is required too: without it Xray-core's own internal resolves fall
+// back to the OS resolver inside the netns, which tun2socks's default route
+// then loops back into Xray's own TUN interface and times out.
 func writeXrayConfig(p profile.Profile, resolvedIP string, port int) (string, error) {
 	proxyOut, err := buildXrayOutbound(p, resolvedIP, port)
 	if err != nil {
@@ -135,6 +138,9 @@ func writeXrayConfig(p profile.Profile, resolvedIP string, port int) (string, er
 
 	cfg := map[string]any{
 		"log": map[string]any{"loglevel": "info"},
+		"dns": map[string]any{
+			"servers": []string{"1.1.1.1"},
+		},
 		"inbounds": []map[string]any{
 			{
 				"tag":      "socks-in",
