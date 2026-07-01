@@ -1,5 +1,5 @@
 // Package run implements the three ways vpnctl launches a program through
-// the active profile (spec §3.4 — the core of the product): blocking CLI
+// the active profile (the core of the product): blocking CLI
 // commands with real stdio streaming, full terminal-takeover TUI programs,
 // and detached GUI applications with desktop-session environment
 // passthrough and privilege dropping.
@@ -74,7 +74,7 @@ func foreground(ng netguard.Engine, argv []string, kind Type) (int, error) {
 
 // GUI launches argv detached from the current terminal/process — vpnctl
 // does not wait for it, so the caller (CLI or TUI) continues immediately.
-// The process runs as the real desktop user (never root — see spec §3.4.3),
+// The process runs as the real desktop user (never root),
 // with DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/DBUS_SESSION_BUS_ADDRESS/
 // PULSE_SERVER passed through from the real user's session.
 func GUI(ng netguard.Engine, argv []string) (int, error) {

@@ -57,8 +57,9 @@ type ActiveState struct {
 	ResolvedPort int           `json:"resolved_port"`
 	Protocol     string        `json:"protocol"`
 	EnginePID    int           `json:"engine_pid"`
-	EngineKind   string        `json:"engine_kind"` // "awg-quick" | "sing-box"
+	EngineKind   string        `json:"engine_kind"` // "awg-quick" | "sing-box" | "xray"
 	EngineLog    string        `json:"engine_log"`  // path to the engine's captured stdout/stderr
+	HelperPID    int           `json:"helper_pid"`  // tun2socks, for a Xray engine (0 otherwise)
 	HealthPID    int           `json:"health_pid"`  // detached health-check daemon (see internal/healthcheck)
 	Since        time.Time     `json:"since"`
 	Processes    []ProcessInfo `json:"processes"`

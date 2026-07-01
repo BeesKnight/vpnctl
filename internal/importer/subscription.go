@@ -1,5 +1,5 @@
 // Package importer turns subscription links and raw WireGuard/AmneziaWG
-// configs into profiles under ~/.config/vpnctl/profiles (spec §3.2).
+// configs into profiles under ~/.config/vpnctl/profiles.
 package importer
 
 import (

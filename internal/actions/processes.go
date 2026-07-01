@@ -13,7 +13,6 @@ import (
 // ListProcesses returns everything tracked as launched through the active
 // profile (vpnctl run / run --tui / run --gui, or an app started from the
 // TUI's Apps panel) — the data behind `vpnctl ps` and the TUI's processes
-// panel (spec §3.4.5).
 func ListProcesses() ([]netguard.ProcessInfo, error) {
 	state, err := netguard.LoadActiveState()
 	if err != nil || state == nil {

@@ -1,5 +1,5 @@
 // Package healthcheck closes the one limitation the bash prototype called
-// out explicitly (spec §3.3): it periodically re-resolves the active
+// out explicitly: it periodically re-resolves the active
 // profile's server hostname and, if the IP changed, rewrites the
 // point-to-point iptables/NAT rules in place — without ever dropping the
 // kill-switch or requiring the TUI to be open. It runs as its own detached
@@ -20,8 +20,8 @@ import (
 )
 
 // DefaultInterval is how often the daemon re-resolves the active server's
-// hostname. Overridable via $VPNCTL_HEALTHCHECK_INTERVAL (seconds) — spec
-// §3.3 calls for this to be configurable.
+// hostname. Overridable via $VPNCTL_HEALTHCHECK_INTERVAL (seconds) 
+// — calls for this to be configurable.
 const DefaultInterval = 30 * time.Second
 
 // Interval reads the configured health-check interval.

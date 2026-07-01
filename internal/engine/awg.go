@@ -219,4 +219,5 @@ func stopWireGuard(ng netguard.Engine, kind profile.Kind) error {
 
 func (h *wgHandle) LogPath() string { return h.logPath }
 func (h *wgHandle) PID() int        { return 0 }
+func (h *wgHandle) HelperPID() int  { return 0 }
 func (h *wgHandle) Kind() string    { return "awg-quick" }

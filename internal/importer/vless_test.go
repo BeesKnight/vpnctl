@@ -76,6 +76,46 @@ func TestParseVLESSWebSocketAndReality(t *testing.T) {
 	}
 }
 
+func TestParseVLESSXHTTPTransport(t *testing.T) {
+	uri := "vless://b831381d-6324-4d53-ad4f-8cda48b30811@203.0.113.10:443?security=tls&sni=cdn.example.com&type=xhttp&path=%2Fxhttp&host=cdn.example.com&mode=stream-one#FirstVDS---01-%5BRU%5D---VLESS"
+
+	name, outbound, err := ParseVLESS(uri)
+	if err != nil {
+		t.Fatalf("ParseVLESS: %v", err)
+	}
+	if name != "FirstVDS---01-[RU]---VLESS" {
+		t.Errorf("expected sanitized name preserved, got %q", name)
+	}
+
+	transport, ok := outbound["transport"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected transport block, got %v", outbound["transport"])
+	}
+	if transport["type"] != "xhttp" {
+		t.Errorf("expected xhttp transport type, got %v", transport["type"])
+	}
+	if transport["path"] != "/xhttp" {
+		t.Errorf("expected path /xhttp, got %v", transport["path"])
+	}
+	if transport["host"] != "cdn.example.com" {
+		t.Errorf("expected host cdn.example.com as a plain field (not a header), got %v", transport["host"])
+	}
+	if transport["mode"] != "stream-one" {
+		t.Errorf("expected mode stream-one, got %v", transport["mode"])
+	}
+}
+
+func TestParseVLESSSplitHTTPIsXHTTPAlias(t *testing.T) {
+	_, outbound, err := ParseVLESS("vless://uuid@host.example.com:443?type=splithttp&path=%2Fsh")
+	if err != nil {
+		t.Fatalf("ParseVLESS: %v", err)
+	}
+	transport, ok := outbound["transport"].(map[string]any)
+	if !ok || transport["type"] != "xhttp" {
+		t.Fatalf("expected splithttp to be normalized to xhttp, got %v", outbound["transport"])
+	}
+}
+
 func TestParseVLESSRejectsWrongScheme(t *testing.T) {
 	_, _, err := ParseVLESS("hysteria2://pw@host:443")
 	if err == nil {

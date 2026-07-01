@@ -79,10 +79,43 @@ func ParseVLESS(raw string) (name string, outbound map[string]any, err error) {
 			transport["service_name"] = svc
 		}
 		outbound["transport"] = transport
+	case "xhttp", "splithttp":
+		// xhttp (formerly SplitHTTP) is a Xray-core-native transport with no
+		// sing-box equivalent — see internal/engine/xray.go, which is the
+		// only consumer of this shape. host/mode are plain fields here
+		// (rather than an HTTP header, unlike ws/http) because that's how
+		// Xray-core's own xhttpSettings represents them.
+		transport := map[string]any{"type": "xhttp"}
+		if path := q.Get("path"); path != "" {
+			transport["path"] = path
+		}
+		if hostHeader := q.Get("host"); hostHeader != "" {
+			transport["host"] = hostHeader
+		}
+		if mode := q.Get("mode"); mode != "" {
+			transport["mode"] = mode
+		}
+		outbound["transport"] = transport
+	case "http", "h2":
+		transport := map[string]any{"type": "http"}
+		if path := q.Get("path"); path != "" {
+			transport["path"] = path
+		}
+		if hostHeader := q.Get("host"); hostHeader != "" {
+			transport["headers"] = map[string]any{"Host": hostHeader}
+		}
+		outbound["transport"] = transport
 	case "", "tcp", "raw":
 		// no transport block needed — plain TCP
 	default:
-		outbound["transport"] = map[string]any{"type": netType}
+		transport := map[string]any{"type": netType}
+		if path := q.Get("path"); path != "" {
+			transport["path"] = path
+		}
+		if hostHeader := q.Get("host"); hostHeader != "" {
+			transport["headers"] = map[string]any{"Host": hostHeader}
+		}
+		outbound["transport"] = transport
 	}
 
 	name = sanitizeName(u.Fragment)

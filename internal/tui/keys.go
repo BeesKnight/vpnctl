@@ -2,7 +2,7 @@ package tui
 
 import "github.com/charmbracelet/bubbles/key"
 
-// keyMap is vpnctl's full hotkey surface (spec §4). Bound to bubbles/help so
+// keyMap is vpnctl's full hotkey surface. Bound to bubbles/help so
 // the bottom bar and the "?" full-help screen render from one source of
 // truth instead of two hand-maintained strings drifting apart.
 type keyMap struct {

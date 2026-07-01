@@ -224,7 +224,7 @@ func (e *LinuxEngine) createNamespace() error {
 
 // lockdownNamespace applies the default-DROP kill-switch inside the
 // namespace, with a single point-to-point ACCEPT for the profile's resolved
-// server IP:port — this is the fail-closed guarantee from spec §5: nothing
+// server IP:port — this is the fail-closed guarantee from
 // else can ever leave the namespace, on purpose or by engine failure.
 func (e *LinuxEngine) lockdownNamespace(kind profile.Kind, serverIP string, port int, proto string) error {
 	run := func(args ...string) error { return e.nsExecRun("iptables", args...) }
@@ -408,7 +408,7 @@ func (e *LinuxEngine) Status() (Status, error) {
 }
 
 // UpdateEndpoint implements Engine. Called periodically by the health-check
-// (spec §3.3) to re-resolve the server hostname and, if it changed, swap the
+// to re-resolve the server hostname and, if it changed, swap the
 // point-to-point ACCEPT/NAT rules in place without ever dropping the
 // kill-switch or tearing down the namespace.
 func (e *LinuxEngine) UpdateEndpoint(p profile.Profile) (bool, string, error) {
@@ -584,9 +584,12 @@ func processAlive(pid int) bool {
 // depend on disappears. Kills by tracked PID only, never by process name, so
 // an unrelated sing-box the user runs independently is never touched.
 func killTrackedProcesses(state *ActiveState) {
-	pids := make([]int, 0, len(state.Processes)+2)
+	pids := make([]int, 0, len(state.Processes)+3)
 	if state.EnginePID != 0 {
 		pids = append(pids, state.EnginePID)
+	}
+	if state.HelperPID != 0 {
+		pids = append(pids, state.HelperPID)
 	}
 	if state.HealthPID != 0 {
 		pids = append(pids, state.HealthPID)

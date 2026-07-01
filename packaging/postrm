@@ -1,5 +1,5 @@
 #!/bin/bash
-# vpnctl postrm — spec §2.2's remove-vs-purge split, standard Debian
+# vpnctl postrm — remove-vs-purge split, standard Debian
 # convention: `apt remove` (arg "remove") keeps user profiles, `apt purge`
 # (arg "purge") removes everything vpnctl ever created, including
 # dependencies it installed itself (never ones that were already present —
@@ -31,14 +31,20 @@ remove_config_dirs() {
 remove_installed_deps() {
   [ -f "$DEPS_FILE" ] || return 0
   installed_singbox="false"
+  installed_xray="false"
+  installed_tun2socks="false"
   installed_awg_tools="false"
   installed_amneziawg_go="false"
   if command -v jq >/dev/null 2>&1; then
     installed_singbox="$(jq -r '.sing_box // false' "$DEPS_FILE" 2>/dev/null || echo false)"
+    installed_xray="$(jq -r '.xray_core // false' "$DEPS_FILE" 2>/dev/null || echo false)"
+    installed_tun2socks="$(jq -r '.tun2socks // false' "$DEPS_FILE" 2>/dev/null || echo false)"
     installed_awg_tools="$(jq -r '.amneziawg_tools // .amneziawg // false' "$DEPS_FILE" 2>/dev/null || echo false)"
     installed_amneziawg_go="$(jq -r '.amneziawg_go // .amneziawg // false' "$DEPS_FILE" 2>/dev/null || echo false)"
   else
     grep -q '"sing_box": *true' "$DEPS_FILE" && installed_singbox="true"
+    grep -q '"xray_core": *true' "$DEPS_FILE" && installed_xray="true"
+    grep -q '"tun2socks": *true' "$DEPS_FILE" && installed_tun2socks="true"
     grep -Eq '"amneziawg_tools": *true|"amneziawg": *true' "$DEPS_FILE" && installed_awg_tools="true"
     grep -Eq '"amneziawg_go": *true|"amneziawg": *true' "$DEPS_FILE" && installed_amneziawg_go="true"
   fi
@@ -46,6 +52,14 @@ remove_installed_deps() {
   if [ "$installed_singbox" = "true" ]; then
     echo "vpnctl postrm: removing sing-box (installed by vpnctl)"
     rm -f /usr/bin/sing-box /usr/local/bin/sing-box
+  fi
+  if [ "$installed_xray" = "true" ]; then
+    echo "vpnctl postrm: removing xray (installed by vpnctl)"
+    rm -f /usr/bin/xray /usr/local/bin/xray
+  fi
+  if [ "$installed_tun2socks" = "true" ]; then
+    echo "vpnctl postrm: removing tun2socks (installed by vpnctl)"
+    rm -f /usr/bin/tun2socks /usr/local/bin/tun2socks
   fi
   if [ "$installed_awg_tools" = "true" ]; then
     echo "vpnctl postrm: removing amneziawg-tools (installed by vpnctl)"

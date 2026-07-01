@@ -1,5 +1,5 @@
 // Package tui is vpnctl's full-screen interactive interface, built on
-// bubbletea/bubbles/lipgloss (spec §4) — profile list, live status, logs,
+// bubbletea/bubbles/lipgloss — profile list, live status, logs,
 // apps and running-processes panels, all visible at once (as in the spec's
 // mockup), plus dedicated Run/Import screens for the two actions that need
 // a full-width input. Closing the TUI never tears down the active
@@ -32,7 +32,7 @@ const (
 )
 
 // focusPane is which of the main screen's navigable panels currently has
-// keyboard focus — mirrors the spec §4 mockup's four simultaneous panels
+// keyboard focus — mirrors the mockup's four simultaneous panels
 // (Profiles/Status/Apps/Running), of which Profiles/Apps/Running are
 // navigable lists and Status(+Logs) is read-only display.
 type focusPane int

@@ -16,7 +16,7 @@ import (
 const HealthCheckDaemonArg = "__healthcheck-daemon"
 
 // spawnHealthCheckDaemon launches a detached copy of the vpnctl binary
-// running just the health-check loop (spec §3.3's periodic re-resolve),
+// running just the health-check loop,
 // fully independent of the `vpnctl use` process that started it and of
 // whether the TUI is ever opened — the daemon exits on its own once it
 // notices the active profile is gone (see internal/healthcheck.Run).

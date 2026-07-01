@@ -9,8 +9,8 @@ import (
 
 type editDoneMsg struct{ err error }
 
-// handleEdit opens the selected profile's underlying file in $EDITOR (spec
-// §4's "e" key), taking over the terminal via tea.ExecProcess exactly like
+// handleEdit opens the selected profile's underlying file in $EDITOR, 
+// taking over the terminal via tea.ExecProcess exactly like
 // Run/Apps launches — $EDITOR is inherently an interactive foreground
 // program, so this is the same mechanism, just with a fixed command instead
 // of a typed or registry one.

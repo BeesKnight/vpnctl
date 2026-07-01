@@ -10,7 +10,7 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/importer"
 )
 
-// importScreenModel is the "Import" form (spec §3.2/§4): a single input
+// importScreenModel is the "Import" form: a single input
 // that accepts either a subscription URL or a path to a WireGuard/AmneziaWG
 // .conf file, dispatched by a simple heuristic (http(s):// vs. anything
 // else). A raw pasted .conf isn't handled here (the CLI's

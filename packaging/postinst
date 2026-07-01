@@ -1,10 +1,11 @@
 #!/bin/bash
 # vpnctl postinst: dpkg/apt is already holding the package-manager lock while
 # this script runs, so this file must never call apt-get. Regular Debian/Kali
-# packages belong in nfpm.yaml's Depends. The two upstream components that are
-# usually not available from the base repos (sing-box and AmneziaWG userspace)
-# are installed from GitHub release assets when possible, with an AmneziaWG
-# source build as the fallback.
+# packages belong in nfpm.yaml's Depends. The upstream components that are
+# usually not available from the base repos (sing-box, Xray-core, tun2socks,
+# and AmneziaWG userspace) are installed from GitHub release assets when
+# possible, with an AmneziaWG source build as the fallback (Xray-core and
+# tun2socks ship prebuilt for every arch vpnctl supports, so they have none).
 set -u
 
 STATE_DIR="/var/lib/vpnctl"
@@ -22,6 +23,8 @@ case "$ARCH" in
 esac
 
 installed_singbox=false
+installed_xray=false
+installed_tun2socks=false
 installed_awg_tools=false
 installed_amneziawg_go=false
 
@@ -109,6 +112,87 @@ install_singbox() {
   fi
 }
 
+# install_named_asset_from_release downloads a release asset matched by its
+# exact filename (rather than install_binary_from_release's substring
+# guessing), for repos whose asset names don't spell out "amd64"/"arm64" the
+# same way sing-box/amneziawg-tools do (Xray-core uses "64"/"arm64-v8a"), or
+# that ship more than one asset per arch that a substring match could
+# ambiguously prefer (tun2socks also publishes a "-v3" amd64 build, which is
+# not safe to assume the target CPU supports). binary_glob matches the
+# extracted file since it isn't always named the same as $2/dest either
+# (tun2socks's archives contain e.g. "tun2socks-linux-amd64", not "tun2socks").
+install_named_asset_from_release() {
+  repo="$1"
+  asset_name="$2"
+  binary_glob="$3"
+  dest="$4"
+
+  url=""
+  while IFS= read -r candidate; do
+    case "$candidate" in
+      */"$asset_name") url="$candidate"; break ;;
+    esac
+  done <<EOF
+$(latest_release_urls "$repo")
+EOF
+  [ -n "$url" ] || return 1
+
+  tmp="$(mktemp -d)"
+  asset="$tmp/asset.zip"
+  if ! curl -fsSL "$url" -o "$asset" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  mkdir -p "$tmp/extract"
+  if ! unzip -qq "$asset" -d "$tmp/extract" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  found="$(find "$tmp/extract" -type f -name "$binary_glob" | head -1)"
+  if [ -n "$found" ] && install -m 0755 "$found" "$dest"; then
+    rm -rf "$tmp"
+    return 0
+  fi
+  rm -rf "$tmp"
+  return 1
+}
+
+install_xray() {
+  if command -v xray >/dev/null 2>&1; then
+    log "xray already present ($(command -v xray)), leaving it alone"
+    return 0
+  fi
+  case "$NORM_ARCH" in
+    amd64) xray_asset="Xray-linux-64.zip" ;;
+    arm64) xray_asset="Xray-linux-arm64-v8a.zip" ;;
+    *) xray_asset="" ;;
+  esac
+  if [ -n "$xray_asset" ] && install_named_asset_from_release "XTLS/Xray-core" "$xray_asset" "xray" "$BIN_DIR/xray"; then
+    installed_xray=true
+    log "xray installed to $BIN_DIR/xray"
+  else
+    log "WARNING: could not install xray from GitHub release assets — VLESS profiles need it"
+  fi
+}
+
+install_tun2socks() {
+  if command -v tun2socks >/dev/null 2>&1; then
+    log "tun2socks already present ($(command -v tun2socks)), leaving it alone"
+    return 0
+  fi
+  case "$NORM_ARCH" in
+    amd64) t2s_asset="tun2socks-linux-amd64.zip" ;;
+    arm64) t2s_asset="tun2socks-linux-arm64.zip" ;;
+    *) t2s_asset="" ;;
+  esac
+  if [ -n "$t2s_asset" ] && install_named_asset_from_release "xjasonlyu/tun2socks" "$t2s_asset" "tun2socks*" "$BIN_DIR/tun2socks"; then
+    installed_tun2socks=true
+    log "tun2socks installed to $BIN_DIR/tun2socks"
+  else
+    log "WARNING: could not install tun2socks from GitHub release assets — VLESS profiles' TUN mode needs it"
+  fi
+}
+
 build_amneziawg_go() {
   tmp="$(mktemp -d)"
   if git clone --depth 1 https://github.com/amnezia-vpn/amneziawg-go "$tmp/amneziawg-go" >/dev/null 2>&1 \
@@ -174,12 +258,16 @@ install_amneziawg_tools() {
 }
 
 install_singbox
+install_xray
+install_tun2socks
 install_amneziawg_go
 install_amneziawg_tools
 
 cat > "$DEPS_FILE" <<EOF
 {
   "sing_box": $installed_singbox,
+  "xray_core": $installed_xray,
+  "tun2socks": $installed_tun2socks,
   "amneziawg_tools": $installed_awg_tools,
   "amneziawg_go": $installed_amneziawg_go
 }

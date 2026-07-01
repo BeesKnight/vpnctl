@@ -13,7 +13,7 @@ import (
 
 // profileItem is either a selectable profile row or a non-selectable
 // section header ("[WG/AmneziaWG]", "[VLESS]", "[Hysteria2]" — see the TUI
-// mockup in spec §4). bubbles/list has no native concept of unselectable
+// mockup). bubbles/list has no native concept of unselectable
 // items, so headers are skipped explicitly by the cursor-movement logic in
 // model.go rather than by the list widget itself.
 type profileItem struct {
@@ -60,7 +60,7 @@ func (d profileDelegate) Update(tea.Msg, *list.Model) tea.Cmd { return nil }
 
 // Render draws one compact line per row — cursor, name, and a kill-switch
 // marker for whichever profile is currently active — matching the density
-// of the mockup in spec §4. Crucially, it truncates to the list's actual
+// of the mockup. Crucially, it truncates to the list's actual
 // allotted width: an earlier version formatted name+kind+endpoint into a
 // single ~60-column string regardless of width, which lipgloss then
 // line-wrapped inside the narrower profiles pane, silently inflating the

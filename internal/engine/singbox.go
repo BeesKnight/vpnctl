@@ -138,4 +138,5 @@ func (h *singBoxHandle) PID() int {
 	}
 	return h.proc.Pid
 }
-func (h *singBoxHandle) Kind() string { return "sing-box" }
+func (h *singBoxHandle) HelperPID() int { return 0 }
+func (h *singBoxHandle) Kind() string   { return "sing-box" }

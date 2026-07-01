@@ -43,8 +43,8 @@ func TestLoadAllGroupsAndSortsProfiles(t *testing.T) {
 		t.Fatalf("expected 4 profiles, got %d: %+v", len(profiles), profiles)
 	}
 
-	// Group order must be WG/AmneziaWG, then VLESS, then Hysteria2 (mockup
-	// order in spec §4), sorted by name within each group.
+	// Group order must be WG/AmneziaWG, then VLESS, then Hysteria2, 
+	// sorted by name within each group.
 	wantOrder := []string{"germany-01", "switz", "nl02-mk01", "kz03-hy01"}
 	for i, name := range wantOrder {
 		if profiles[i].Name != name {

@@ -1,15 +1,15 @@
-# nfpm config for vpnctl's .deb package (spec §2.1/§2.2).
+# nfpm config for vpnctl's .deb package.
 #
 # Build with:
 #   go build -o packaging/vpnctl ./cmd/vpnctl
-#   nfpm package --config packaging/nfpm.yaml --target vpnctl_1.0.1_amd64.deb --packager deb
+#   nfpm package --config packaging/nfpm.yaml --target vpnctl_1.0.4_amd64.deb --packager deb
 #
 # Bump `version:` below for each release (this nfpm version has no
 # --version/--arch package-command override, so it has to live here).
 name: vpnctl
 arch: amd64
 platform: linux
-version: 1.0.1
+version: 1.0.4
 maintainer: "vpnctl maintainers <shterenfeld151@gmail.com>"
 homepage: https://github.com/BeesKnight/vpnctl
 license: MIT
@@ -31,6 +31,7 @@ depends:
   - util-linux
   - curl
   - ca-certificates
+  - unzip
   - git
   - golang-go
   - make

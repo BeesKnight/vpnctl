@@ -11,7 +11,7 @@ import (
 )
 
 // guiEnvKeys are the desktop-session environment variables a GUI program
-// needs to find the display/audio/session bus (spec §3.4.3). X11/Wayland
+// needs to find the display/audio/session bus. X11/Wayland
 // sockets are UNIX domain sockets, not network sockets, so the namespace's
 // kill-switch never blocks them by itself — but the launched process still
 // needs these variables explicitly, since it's exec'd via nsenter as a

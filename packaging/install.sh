@@ -1,5 +1,5 @@
 #!/bin/bash
-# vpnctl install.sh — the zero-friction MVP installer (spec §2.1/§2.2),
+# vpnctl install.sh — the zero-friction MVP installer,
 # the alternative to `dpkg -i vpnctl_*.deb` for machines that just want:
 #
 #   curl -fsSL https://raw.githubusercontent.com/BeesKnight/vpnctl/main/packaging/install.sh | sudo bash

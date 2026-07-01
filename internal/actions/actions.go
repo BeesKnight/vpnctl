@@ -2,11 +2,13 @@
 // test connectivity, report status) shared by both the non-interactive CLI
 // (cmd/vpnctl) and the TUI (internal/tui), so the two surfaces can never
 // drift apart — every TUI action is backed by the same function a
-// corresponding CLI flag calls (spec §4.1).
+// corresponding CLI flag calls.
 package actions
 
 import (
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/BeesKnight/vpnctl/internal/engine"
@@ -15,6 +17,21 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/run"
 	"github.com/BeesKnight/vpnctl/internal/sysuser"
 )
+
+// engineStartupGrace is how long Activate waits after a persistent
+// foreground engine process (sing-box/xray) forks before trusting that it's
+// actually up. Decode errors, bind conflicts, and unsupported-transport
+// failures typically kill such a process within the first few hundred
+// milliseconds — well before a successful fork+exec alone would ever reveal
+// that. WireGuard/AmneziaWG has no persistent process to wait on (awg-quick
+// configures the interface and exits, and its own exit status is already
+// checked in startWireGuard), so it's exempt — see the PID()==0 check below.
+const engineStartupGrace = 300 * time.Millisecond
+
+// logTailLines is how many trailing lines of the engine's log get folded
+// into an activation-failure error, so the user isn't forced to go `cat` the
+// log file themselves to see why the engine died.
+const logTailLines = 5
 
 // RequireRoot returns a clear error if vpnctl wasn't invoked with root
 // privileges, needed for every network-affecting operation.
@@ -27,8 +44,8 @@ func RequireRoot() error {
 
 // Activate brings up the named profile: kill-switch namespace first, then
 // the awg-quick/sing-box engine inside it. Refuses to switch while
-// processes are still running through the current profile (spec §5's
-// "atomic switch" requirement) — stop them with `vpnctl kill` first.
+// processes are still running through the current profile
+// — stop them with `vpnctl kill` first.
 func Activate(name string) (profile.Profile, netguard.Status, engine.Handle, error) {
 	if err := checkNoRunningProcesses(); err != nil {
 		return profile.Profile{}, netguard.Status{}, nil, err
@@ -47,13 +64,29 @@ func Activate(name string) (profile.Profile, netguard.Status, engine.Handle, err
 
 	handle, err := engine.Start(ng, p)
 	if err != nil {
+		_ = ng.Teardown()
 		return p, status, nil, fmt.Errorf("starting engine: %w", err)
+	}
+
+	// A successful fork+exec only means the process launched, not that it
+	// stayed up — give a persistent foreground engine (sing-box/xray) a real
+	// chance to crash before reporting the activation a success. Without
+	// this, a profile whose engine dies moments after starting (e.g. on an
+	// unsupported transport) would still be reported as UP.
+	if handle.PID() != 0 {
+		time.Sleep(engineStartupGrace)
+		if healthy, herr := handle.Healthy(); herr != nil || !healthy {
+			_ = handle.Stop()
+			_ = ng.Teardown()
+			return p, status, nil, fmt.Errorf("engine failed to start (see %s):\n%s", handle.LogPath(), tailLogFile(handle.LogPath(), logTailLines))
+		}
 	}
 
 	if state, err := netguard.LoadActiveState(); err == nil && state != nil {
 		state.EnginePID = handle.PID()
 		state.EngineKind = handle.Kind()
 		state.EngineLog = handle.LogPath()
+		state.HelperPID = handle.HelperPID()
 		if pid, err := spawnHealthCheckDaemon(); err == nil {
 			state.HealthPID = pid
 		}
@@ -61,6 +94,23 @@ func Activate(name string) (profile.Profile, netguard.Status, engine.Handle, err
 	}
 
 	return p, status, handle, nil
+}
+
+// tailLogFile returns the last n non-empty-file lines of the file at path,
+// for folding straight into an activation-failure error. Best-effort: a
+// missing or unreadable log (e.g. the engine died before ever writing one)
+// yields an empty string rather than its own error, since the outer error
+// already names the log path for the user to check by hand if needed.
+func tailLogFile(path string, n int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
 }
 
 func checkNoRunningProcesses() error {

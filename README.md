@@ -45,7 +45,13 @@ proxy setting an app might ignore.
   `iptables`, `jq`, `curl`.
 - `awg-quick` and `awg` (from `amneziawg-tools`) plus `amneziawg-go` for
   AmneziaWG profiles.
-- `sing-box` for VLESS/Hysteria2 profiles.
+- `xray` (Xray-core) and `tun2socks` for VLESS profiles — Xray-core is VLESS's
+  reference implementation and supports every transport in the wild
+  (`xhttp`/`ws`/`grpc`/`http`/`tcp`/`kcp`), including `xhttp`, which the
+  official `sing-box` build doesn't ship. Xray-core has no native TUN
+  inbound, so `tun2socks` turns its local SOCKS5 inbound into the same kind
+  of transparent `vpnctl-tun` device sing-box's own TUN inbound provides.
+- `sing-box` for Hysteria2 profiles (Xray-core has no Hysteria2 support).
 
 `vpnctl doctor` checks all of the above and tells you exactly what's
 missing.
@@ -55,15 +61,16 @@ missing.
 ### Option A — `.deb` package (recommended on Kali/Debian)
 
 ```bash
-sudo apt install ./vpnctl_1.0.1_amd64.deb
+sudo apt install ./vpnctl_1.0.4_amd64.deb
 ```
 
 Use `apt install ./...`, not `dpkg -i`: apt resolves the package's ordinary
 Debian/Kali dependencies before `postinst` runs. `postinst` never calls
 `apt-get` itself; it only handles upstream components that are usually not in
-the base repos (`sing-box`, `amneziawg-tools`, `amneziawg-go`) by downloading a
-matching GitHub release asset where possible, then falling back to the official
-source builds for AmneziaWG. Nothing is interactive; any failure is printed,
+the base repos (`sing-box`, `xray`, `tun2socks`, `amneziawg-tools`,
+`amneziawg-go`) by downloading a matching GitHub release asset where
+possible, then falling back to the official source builds for AmneziaWG.
+Nothing is interactive; any failure is printed,
 not blocked on a debconf prompt. Run `vpnctl doctor` afterwards to confirm
 everything landed.
 
@@ -73,8 +80,8 @@ Removing the package is symmetric:
 sudo apt remove vpnctl    # tears down any active profile, clears runtime
                           # state, leaves your profiles in ~/.config/vpnctl
 sudo apt purge vpnctl     # also deletes ~/.config/vpnctl, and removes any
-                          # of sing-box/amneziawg-tools that vpnctl itself
-                          # installed (never ones you already had)
+                          # of sing-box/xray/tun2socks/amneziawg-tools that
+                          # vpnctl itself installed (never ones you already had)
 ```
 
 ### Option B — `install.sh`
@@ -128,8 +135,8 @@ sudo vpnctl down
 ```
 
 Closing the TUI (`q`) does **not** tear down the active profile — the
-namespace, the engine (`awg-quick`/`sing-box`), and the health-check daemon
-all run detached from the TUI/CLI process that started them, so the tunnel
+namespace, the engine (`awg-quick`/`sing-box`/`xray`+`tun2socks`), and the
+health-check daemon all run detached from the TUI/CLI process that started them, so the tunnel
 survives across separate `vpnctl` invocations. `vpnctl status` (or
 reopening the TUI) picks the current state back up from
 `~/.local/state/vpnctl/active.json`.
@@ -157,10 +164,12 @@ apps:
 ## Design notes / known limitations
 
 - **All profile families are transparent tunnels.** WireGuard/AmneziaWG uses
-  its kernel/userspace WireGuard interface; VLESS/Hysteria2 uses sing-box's
-  TUN inbound (`vpnctl-tun`). Programs launched through `vpnctl run` or the
-  Apps panel do not need SOCKS5/HTTP proxy settings. If the tunnel engine is
-  down, the namespace's default-DROP kill-switch leaves them with no route
+  its kernel/userspace WireGuard interface; Hysteria2 uses sing-box's native
+  TUN inbound; VLESS uses Xray-core paired with tun2socks (Xray-core has no
+  native TUN inbound of its own). All three end up as the same `vpnctl-tun`
+  device from the kill-switch's point of view. Programs launched through
+  `vpnctl run` or the Apps panel do not need SOCKS5/HTTP proxy settings. If
+  the tunnel engine is down, the namespace's default-DROP kill-switch leaves them with no route
   rather than a direct connection.
 - **Switching profiles while something is running is refused, not forced.**
   If `vpnctl ps` shows tracked processes, `vpnctl use <other>` errors out
@@ -188,7 +197,7 @@ vpnctl/
 ├── internal/
 │   ├── actions/         # shared CLI/TUI operations (activate, test, ps/kill, ...)
 │   ├── apps/            # apps.yaml registry
-│   ├── engine/          # awg-quick / sing-box process management
+│   ├── engine/          # awg-quick / sing-box / xray+tun2socks process management
 │   ├── healthcheck/      # detached re-resolve daemon
 │   ├── importer/        # subscription + WireGuard config import
 │   ├── netguard/         # netns + iptables kill-switch (the only place that
@@ -216,7 +225,8 @@ WireGuard/AmneziaWG config parsing (including the `Jc`/`Jmin`/`Jmax`/
 generation in dry-run mode (`netguard.NewLinuxEngine(true)` — records every
 `ip`/`iptables` invocation it would have made instead of running it).
 
-Actually creating network namespaces, running `awg-quick`/`sing-box`, and
-the full install/purge cycle need root and a real Linux network stack —
+Actually creating network namespaces, running `awg-quick`/`sing-box`/
+`xray`+`tun2socks`, and the full install/purge cycle need root and a real
+Linux network stack —
 exercise those on the target Kali machine itself, not in a locked-down
 container/CI sandbox without `CAP_SYS_ADMIN`.

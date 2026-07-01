@@ -10,8 +10,8 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/netguard"
 )
 
-// viewMain renders all four panels at once (Profiles/Status/Apps/Running —
-// spec §4's mockup), with the currently-focused panel's border highlighted,
+// viewMain renders all four panels at once (Profiles/Status/Apps/Running mockup), 
+// with the currently-focused panel's border highlighted,
 // matching the k9s/lazygit feel of "everything visible, tab moves focus"
 // rather than modal full-screen sub-views.
 func (m Model) viewMain() string {

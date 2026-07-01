@@ -1,5 +1,5 @@
 // Package apps manages vpnctl's application registry (~/.config/vpnctl/
-// apps.yaml — spec §3.4.4), so the TUI's Apps panel can launch a
+// apps.yaml), so the TUI's Apps panel can launch a
 // pre-configured program (Firefox, Burp, htop, an nmap scan, ...) through
 // the active profile with the correct launch mode (gui/tui/cli) already
 // known, without the user re-typing a command or remembering flags.

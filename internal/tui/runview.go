@@ -10,10 +10,10 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/netguard"
 )
 
-// runScreenModel is the "Run" screen (spec §3.4.1/§4): type a command,
+// runScreenModel is the "Run" screen: type a command,
 // enter takes over the terminal via tea.ExecProcess and runs it inside the
 // active namespace with real stdio (streaming output, TUI programs and all —
-// this is the same mechanism spec §3.4.2 calls for when launching a
+// this is the same mechanism calls for when launching a
 // TUI/interactive program from inside vpnctl's own TUI), then returns
 // control to vpnctl once the command exits.
 type runScreenModel struct {

@@ -37,7 +37,7 @@ type ExecOptions struct {
 	Dir string
 	// DropToUID/DropToGID, if set, make the command run as this uid/gid
 	// instead of root once inside the namespace (GUI apps must never run as
-	// root — see spec §3.4.3). Implemented via nsenter's own --setuid/
+	// root). Implemented via nsenter's own --setuid/
 	// --setgid, since the namespace join itself still requires root: nsenter
 	// does the privileged setns() first, then drops to this uid/gid, then
 	// execve()s the target — there is no window where the target runs as root.

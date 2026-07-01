@@ -30,7 +30,9 @@ func cmdDoctor(args []string) error {
 	results = append(results, checkBinary("setpriv", "util-linux")...)
 	results = append(results, checkBinary("jq", "jq")...)
 	results = append(results, checkBinary("curl", "curl")...)
-	results = append(results, checkEngineBinary("sing-box", "VLESS/Hysteria2 profiles")...)
+	results = append(results, checkEngineBinary("sing-box", "Hysteria2 profiles")...)
+	results = append(results, checkEngineBinary("xray", "VLESS profiles")...)
+	results = append(results, checkEngineBinary("tun2socks", "VLESS profiles' TUN mode (paired with xray)")...)
 	results = append(results, checkAWG()...)
 
 	results = append(results, checkResult{
