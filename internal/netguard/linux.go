@@ -29,8 +29,11 @@ const (
 	SingBoxTunAddress   = "172.19.0.1/30"
 	SingBoxTunDNS       = "172.19.0.2"
 
-	vethHost   = "vpnctl-h0"
-	vethNS     = "vpnctl-n0"
+	vethHost = "vpnctl-h0"
+	// VethNS is the veth interface name inside the namespace, exported so
+	// internal/engine can route the VLESS/Hysteria2 server's own connection
+	// through it (see tunPostUpCommand) rather than back into the TUN device.
+	VethNS     = "vpnctl-n0"
 	hostIP     = HostIP
 	nsIP       = NamespaceIP
 	subnetCIDR = "10.200.200.0/24"
@@ -195,10 +198,10 @@ func (e *LinuxEngine) createNamespace() error {
 	if err := e.runner.Run("ip", "netns", "add", Namespace); err != nil {
 		return err
 	}
-	if err := e.runner.Run("ip", "link", "add", vethHost, "type", "veth", "peer", "name", vethNS); err != nil {
+	if err := e.runner.Run("ip", "link", "add", vethHost, "type", "veth", "peer", "name", VethNS); err != nil {
 		return err
 	}
-	if err := e.runner.Run("ip", "link", "set", vethNS, "netns", Namespace); err != nil {
+	if err := e.runner.Run("ip", "link", "set", VethNS, "netns", Namespace); err != nil {
 		return err
 	}
 	if err := e.runner.Run("ip", "addr", "add", hostCIDR, "dev", vethHost); err != nil {
@@ -207,10 +210,10 @@ func (e *LinuxEngine) createNamespace() error {
 	if err := e.runner.Run("ip", "link", "set", vethHost, "up"); err != nil {
 		return err
 	}
-	if err := e.nsExecRun("ip", "addr", "add", nsCIDR, "dev", vethNS); err != nil {
+	if err := e.nsExecRun("ip", "addr", "add", nsCIDR, "dev", VethNS); err != nil {
 		return err
 	}
-	if err := e.nsExecRun("ip", "link", "set", vethNS, "up"); err != nil {
+	if err := e.nsExecRun("ip", "link", "set", VethNS, "up"); err != nil {
 		return err
 	}
 	if err := e.nsExecRun("ip", "link", "set", "lo", "up"); err != nil {

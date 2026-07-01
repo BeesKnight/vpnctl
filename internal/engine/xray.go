@@ -75,7 +75,7 @@ func startXray(ng netguard.Engine, p profile.Profile, status netguard.Status) (H
 	tun2socksCmd, err := ng.Command("tun2socks", []string{
 		"-device", "tun://" + netguard.SingBoxTunInterface,
 		"-proxy", fmt.Sprintf("socks5://127.0.0.1:%d", xraySocksPort),
-		"-tun-post-up", tunPostUpCommand(),
+		"-tun-post-up", tunPostUpCommand(status.ResolvedIP),
 	}, netguard.ExecOptions{})
 	if err != nil {
 		_ = xrayCmd.Process.Kill()
@@ -112,9 +112,20 @@ func startXray(ng netguard.Engine, p profile.Profile, status netguard.Status) (H
 // land in the right namespace without going through netguard.Engine.Command
 // a second time. Point-to-point, no gateway needed, same as sing-box's own
 // `auto_route` for its native tun inbound.
-func tunPostUpCommand() string {
+//
+// Unlike sing-box's tun inbound, tun2socks has no `route_exclude_address`
+// equivalent to keep Xray's own connection to the VLESS server out of the
+// TUN it's about to become the default route. Without an explicit host route,
+// that connection would loop back into vpnctl-tun and never reach the
+// server. So a /32 host route to resolvedIP is added first, via the
+// original veth path (netguard.HostIP/netguard.VethNS) that the kill-switch's
+// allowHostForwarding NAT already expects — more specific than the default
+// route replaced afterward, so it keeps winning even once vpnctl-tun becomes
+// the default.
+func tunPostUpCommand(resolvedIP string) string {
 	return fmt.Sprintf(
-		"sh -c 'ip addr add %s dev %s && ip link set %s up && ip route replace default dev %s'",
+		"sh -c 'ip route add %s/32 via %s dev %s && ip addr add %s dev %s && ip link set %s up && ip route replace default dev %s'",
+		resolvedIP, netguard.HostIP, netguard.VethNS,
 		netguard.SingBoxTunAddress, netguard.SingBoxTunInterface,
 		netguard.SingBoxTunInterface, netguard.SingBoxTunInterface,
 	)

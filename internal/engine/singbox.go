@@ -92,7 +92,6 @@ func writeSingBoxConfig(p profile.Profile, resolvedIP string, port int) (string,
 		},
 		"outbounds": []map[string]any{
 			outbound,
-			{"type": "dns", "tag": "dns-out"},
 			{"type": "direct", "tag": "direct-out"},
 		},
 		"route": map[string]any{

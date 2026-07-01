@@ -3,8 +3,10 @@ package engine
 import (
 	"encoding/json"
 	"os"
+	"strings"
 	"testing"
 
+	"github.com/BeesKnight/vpnctl/internal/netguard"
 	"github.com/BeesKnight/vpnctl/internal/profile"
 )
 
@@ -251,6 +253,25 @@ func TestWriteXrayConfigRealityAndWS(t *testing.T) {
 	wsSettings, ok := stream["wsSettings"].(map[string]any)
 	if !ok || wsSettings["path"] != "/ws" {
 		t.Errorf("expected ws path preserved, got %v", stream["wsSettings"])
+	}
+}
+
+func TestTunPostUpCommandExcludesServerFromTun(t *testing.T) {
+	cmd := tunPostUpCommand("185.220.10.5")
+
+	hostRoute := "ip route add 185.220.10.5/32 via " + netguard.HostIP + " dev " + netguard.VethNS
+	if !strings.Contains(cmd, hostRoute) {
+		t.Fatalf("expected post-up command to route the resolved server IP via the original veth path, got %q", cmd)
+	}
+
+	replaceDefault := "ip route replace default dev " + netguard.SingBoxTunInterface
+	hostRouteIdx := strings.Index(cmd, hostRoute)
+	replaceDefaultIdx := strings.Index(cmd, replaceDefault)
+	if replaceDefaultIdx == -1 {
+		t.Fatalf("expected post-up command to replace the default route, got %q", cmd)
+	}
+	if hostRouteIdx > replaceDefaultIdx {
+		t.Errorf("expected the resolved server's host route to be added before the default route is replaced, got %q", cmd)
 	}
 }
 
