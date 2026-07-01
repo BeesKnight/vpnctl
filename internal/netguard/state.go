@@ -123,7 +123,7 @@ func ClearActiveState() error {
 // --gui) against the active profile, for `vpnctl ps`/`vpnctl kill` and the
 // "atomic switch" guard in cmdUse. Best-effort: not safe against concurrent
 // vpnctl invocations racing on the same state file (acceptable for a
-// single-operator pentest stand; see README known limitations).
+// single-operator ; see README known limitations).
 func AddProcess(pi ProcessInfo) error {
 	state, err := LoadActiveState()
 	if err != nil {

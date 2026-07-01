@@ -7,8 +7,8 @@ running GUI, CLI, and TUI programs through whichever profile is active,
 guaranteed with no path to a direct/leaked connection.
 
 ```
-┌─ vpnctl ─────────────────────────────────────────────────────────┐
-│ PROFILES                          │ STATUS                        │
+┌─ vpnctl ───────────────────────────────────────────────────────────┐
+│ PROFILES                          │ STATUS                         │
 │ [WG/AmneziaWG]                    │ Active: switz (AmneziaWG)      │
 │ > switz               ●active     │ State:  UP                     │
 │   germany-01                      │ Server: 185.x.x.x:51820/udp    │
@@ -16,8 +16,8 @@ guaranteed with no path to a direct/leaked connection.
 │   nl02-mk01                       │ LOGS                           │
 │ [Hysteria2]                       │ [awg-quick] handshake ok       │
 │   kz03-hy01                       │                                │
-├────────────────────────────────────┼────────────────────────────────┤
-│ APPS                              │ RUNNING (through active profile)│
+├───────────────────────────────────┼────────────────────────────────┤
+│ APPS                              │RUNNING (through active profile)│
 │ > Firefox            [gui]        │ firefox      pid 4821  12m up  │
 │   htop                [tui]       │                                │
 └────────────────────────────────────────────────────────────────────┘
@@ -161,7 +161,7 @@ apps:
   through a proxy profile. WireGuard/AmneziaWG profiles route transparently
   (the namespace's default route is the WG interface itself), so this
   distinction only applies to VLESS/Hysteria2. Either way, anything that
-  *isn't* going through the permitted path is dropped by the kill-switch —
+  _isn't_ going through the permitted path is dropped by the kill-switch —
   the failure mode is "no connectivity," never "accidental leak."
 - **Switching profiles while something is running is refused, not forced.**
   If `vpnctl ps` shows tracked processes, `vpnctl use <other>` errors out
