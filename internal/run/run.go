@@ -76,7 +76,9 @@ func foreground(ng netguard.Engine, argv []string, kind Type) (int, error) {
 // does not wait for it, so the caller (CLI or TUI) continues immediately.
 // The process runs as the real desktop user (never root),
 // with DISPLAY/WAYLAND_DISPLAY/XAUTHORITY/DBUS_SESSION_BUS_ADDRESS/
-// PULSE_SERVER passed through from the real user's session.
+// PULSE_SERVER passed through from the real user's session, and
+// HOME/USER/LOGNAME set to that user's own account so profile-based apps
+// (Firefox, Tor Browser) find their profile instead of failing to load one.
 func GUI(ng netguard.Engine, argv []string) (int, error) {
 	if len(argv) == 0 {
 		return 0, fmt.Errorf("no command given")

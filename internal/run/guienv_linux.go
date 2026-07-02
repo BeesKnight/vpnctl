@@ -5,6 +5,7 @@ package run
 import (
 	"fmt"
 	"os"
+	"os/user"
 	"strconv"
 	"strings"
 	"syscall"
@@ -56,6 +57,18 @@ func resolveGUIEnv(uid int) []string {
 	}
 	if env["DBUS_SESSION_BUS_ADDRESS"] == "" {
 		env["DBUS_SESSION_BUS_ADDRESS"] = fmt.Sprintf("unix:path=/run/user/%d/bus", uid)
+	}
+
+	// HOME/USER/LOGNAME are looked up authoritatively from the password
+	// database rather than scanned from /proc or inherited from the current
+	// process, since GUI apps (Firefox, Tor Browser) refuse to start without
+	// a real, writable $HOME to load their profile from — and vpnctl's own
+	// process environment under sudo has $HOME pointing at root's, not the
+	// target uid's.
+	if u, err := user.LookupId(strconv.Itoa(uid)); err == nil {
+		env["HOME"] = u.HomeDir
+		env["USER"] = u.Username
+		env["LOGNAME"] = u.Username
 	}
 
 	out := make([]string, 0, len(env))
