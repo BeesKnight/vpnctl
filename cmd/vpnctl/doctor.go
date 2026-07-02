@@ -8,6 +8,7 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/netguard"
 	"github.com/BeesKnight/vpnctl/internal/profile"
 	"github.com/BeesKnight/vpnctl/internal/sysuser"
+	"github.com/BeesKnight/vpnctl/internal/vpnctlclient"
 )
 
 type checkResult struct {
@@ -34,6 +35,7 @@ func cmdDoctor(args []string) error {
 	results = append(results, checkEngineBinary("xray", "VLESS profiles")...)
 	results = append(results, checkEngineBinary("tun2socks", "VLESS profiles' TUN mode (paired with xray)")...)
 	results = append(results, checkAWG()...)
+	results = append(results, checkVpnctld())
 	results = append(results, checkStaleWireGuardSocket())
 
 	results = append(results, checkResult{
@@ -104,6 +106,21 @@ func checkAWG() []checkResult {
 	return results
 }
 
+// checkVpnctld reports whether the daemon is reachable at all — during
+// this migration (see DAEMON_MIGRATION.md), use/down/status/test/ps/kill
+// all need it; a clear, upfront "daemon unreachable" here is more useful
+// than each of those commands separately failing to connect.
+func checkVpnctld() checkResult {
+	if _, err := vpnctlclient.Status(); err != nil {
+		return checkResult{
+			name: "vpnctld",
+			ok:   false,
+			info: fmt.Sprintf("not reachable at %s — use/down/status/test/ps/kill need it running (%v)", vpnctlclient.SocketPath(), err),
+		}
+	}
+	return checkResult{name: "vpnctld", ok: true, info: "reachable at " + vpnctlclient.SocketPath()}
+}
+
 // checkStaleWireGuardSocket flags the exact failure mode behind the A1
 // prerm bug: a leftover /var/run/wireguard/vpnctl-wg.sock from an
 // amneziawg-go/wg-quick process that never exited makes the next
@@ -117,11 +134,13 @@ func checkStaleWireGuardSocket() checkResult {
 		return checkResult{name: "WireGuard UAPI socket", ok: true, info: "no stale socket at " + sockPath}
 	}
 
-	active := false
-	if status, err := netguard.NewLinuxEngine(false).Status(); err == nil {
-		active = status.Active
+	result, err := vpnctlclient.Status()
+	if err != nil {
+		// vpnctld unreachable: can't confirm either way, so this isn't
+		// treated as a hard failure — see checkVpnctld for that.
+		return checkResult{name: "WireGuard UAPI socket", ok: true, info: fmt.Sprintf("socket exists at %s, but vpnctld isn't reachable to confirm whether it's expected", sockPath)}
 	}
-	if active {
+	if result.Status.Active {
 		return checkResult{name: "WireGuard UAPI socket", ok: true, info: sockPath + " (in use by the active profile)"}
 	}
 	return checkResult{
@@ -138,7 +157,7 @@ func rootInfo() string {
 		}
 		return "running as root"
 	}
-	return "not root — network operations (use/down/run/test) need sudo"
+	return "not root — `vpnctl run`/the TUI still need sudo directly (not yet migrated to vpnctld, see DAEMON_MIGRATION.md); use/down/status/test/ps/kill go through the daemon and don't need it"
 }
 
 func checkNetns() checkResult {

@@ -4,11 +4,11 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/BeesKnight/vpnctl/internal/actions"
+	"github.com/BeesKnight/vpnctl/internal/vpnctlclient"
 )
 
 func cmdPs(args []string) error {
-	procs, err := actions.ListProcesses()
+	procs, err := vpnctlclient.ListProcesses()
 	if err != nil {
 		return err
 	}
@@ -27,7 +27,7 @@ func cmdKill(args []string) error {
 	if len(args) == 0 {
 		return fmt.Errorf("usage: vpnctl kill <pid|name>")
 	}
-	pi, err := actions.KillProcess(args[0])
+	pi, err := vpnctlclient.KillProcess(args[0])
 	if err != nil {
 		return err
 	}

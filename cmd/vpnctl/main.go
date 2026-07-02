@@ -72,15 +72,15 @@ func printUsage() {
 	fmt.Println(`vpnctl - VPN/proxy profile launcher with kernel-level kill-switch
 
 Usage:
-  vpnctl                       launch interactive TUI
+  vpnctl                       launch interactive TUI (still needs sudo — see below)
   vpnctl list                  list all profiles
-  vpnctl use <profile>         activate a profile (recreate netns, bring up engine)
-  vpnctl down                  deactivate the active profile, tear down netns
-  vpnctl status                show active profile / kill-switch state
-  vpnctl test                  test external connectivity through the active profile
-  vpnctl run -- <cmd...>       run a CLI command through the active profile (blocking)
-  vpnctl run --tui -- <cmd...> run an interactive TUI program (terminal takeover)
-  vpnctl run --gui -- <cmd...> run a GUI program detached, through the active profile
+  vpnctl use <profile>         activate a profile, via vpnctld — no sudo needed
+  vpnctl down                  deactivate the active profile, via vpnctld — no sudo needed
+  vpnctl status                show active profile / kill-switch state, via vpnctld
+  vpnctl test                  test external connectivity through the active profile, via vpnctld
+  vpnctl run -- <cmd...>       run a CLI command through the active profile (blocking) — needs sudo
+  vpnctl run --tui -- <cmd...> run an interactive TUI program (terminal takeover) — needs sudo
+  vpnctl run --gui -- <cmd...> run a GUI program detached, through the active profile — needs sudo
   vpnctl ps                    list processes launched through the active profile
   vpnctl kill <pid|name>       kill a process launched through the active profile
   vpnctl import --sub <url>    import profiles from a subscription link
@@ -88,5 +88,11 @@ Usage:
   vpnctl insecure <profile>    disable TLS certificate verification for one VLESS/Hysteria2 profile
   vpnctl insecure <profile> off  re-enable TLS certificate verification for it
   vpnctl doctor                check system dependencies and configuration
-  vpnctl help                  show this message`)
+  vpnctl help                  show this message
+
+use/down/status/test/ps/kill talk to the vpnctld daemon (must be running —
+see DAEMON_MIGRATION.md). The bare TUI and run still touch networking
+directly and need root, until they move behind vpnctld too: a profile
+activated via the daemon won't show up in the TUI yet, and vice versa —
+don't mix the two in the same session.`)
 }
