@@ -5,10 +5,10 @@
 // name is fixed). vpnctl (CLI/TUI) talks to it over a Unix socket using
 // internal/rpc rather than touching netguard/the engine directly.
 //
-// This package currently covers only the non-streaming commands (use,
-// down, status, test, ps, kill) — see DAEMON_MIGRATION.md for what's
-// deliberately not here yet (process launching/PTY proxying for `run` and
-// the TUI, systemd/packaging integration).
+// This package covers use/down/status/test/ps/kill (request/response) and
+// `vpnctl run`'s three modes via Exec (streaming — see exec.go) — see
+// DAEMON_MIGRATION.md for what's deliberately not here yet (the TUI's own
+// process launchers, systemd/packaging integration).
 package vpnctld
 
 import (
@@ -49,9 +49,10 @@ type activeState struct {
 
 // Server is vpnctld's connection-handling and state-owning core.
 type Server struct {
-	mu     sync.Mutex
-	ng     netguard.Engine
-	active *activeState // nil when no profile is active
+	mu        sync.Mutex
+	ng        netguard.Engine
+	active    *activeState           // nil when no profile is active
+	processes []netguard.ProcessInfo // everything launched via Exec (see exec.go); the daemon-owned replacement for netguard.ActiveState.Processes/AddProcess/RemoveProcess, which existed to coordinate independent CLI processes through a file
 
 	logger *log.Logger
 }
@@ -121,10 +122,22 @@ func (s *Server) handleConn(conn net.Conn) {
 		return // client disconnected or sent garbage; nothing to reply to
 	}
 
-	resp := rpc.Response{ID: req.ID}
 	if req.APIVersion != rpc.APIVersion {
-		resp.Error = fmt.Sprintf("protocol version mismatch: client=%q daemon=%q — rebuild vpnctl/vpnctld to matching versions", req.APIVersion, rpc.APIVersion)
-	} else if result, err := s.dispatch(req.Method, req.Params); err != nil {
+		_ = rpc.WriteMessage(conn, &rpc.Response{ID: req.ID, Error: fmt.Sprintf("protocol version mismatch: client=%q daemon=%q — rebuild vpnctl/vpnctld to matching versions", req.APIVersion, rpc.APIVersion)})
+		return
+	}
+
+	// MethodExec is the one method that doesn't fit request/response: once
+	// accepted, this same connection carries a stream of rpc.Frames instead
+	// of closing after a single reply — see exec.go. Every other method
+	// stays plain request/response, handled by dispatch below.
+	if req.Method == rpc.MethodExec {
+		s.handleExecConn(conn, req)
+		return
+	}
+
+	resp := rpc.Response{ID: req.ID}
+	if result, err := s.dispatch(req.Method, req.Params); err != nil {
 		resp.Error = err.Error()
 	} else if data, err := json.Marshal(result); err != nil {
 		resp.Error = fmt.Sprintf("marshaling result: %v", err)

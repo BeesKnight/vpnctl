@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/BeesKnight/vpnctl/internal/engine"
@@ -159,6 +161,14 @@ func (s *Server) handleDeactivate() (*struct{}, error) {
 // unconditionally, so it's the right fallback even when the graceful Stop
 // didn't complete.
 func (s *Server) deactivateLocked() error {
+	// Kill everything still running through the profile (vpnctl run/run
+	// --tui/run --gui) before the namespace they live inside disappears.
+	// Teardown() can't do this itself here the way it does in the old
+	// file-based model (killTrackedProcesses reads active.json, which the
+	// daemon never writes) — this is the daemon's own equivalent, using its
+	// in-memory s.processes instead.
+	s.killTrackedProcessesLocked()
+
 	var stopErr error
 	if s.active != nil {
 		s.active.healthStop()
@@ -244,14 +254,84 @@ func (s *Server) handleTestConnectivity() (*rpc.TestConnectivityResult, error) {
 	}, nil
 }
 
-// handleListProcesses/handleKillProcess are real RPCs already, but process
-// tracking has nowhere to be populated from until `vpnctl run`/the TUI's
-// app launchers move behind the daemon too (see DAEMON_MIGRATION.md) — an
-// empty list here is accurate for what the daemon manages today, not a stub.
-func (s *Server) handleListProcesses() (*rpc.ListProcessesResult, error) {
-	return &rpc.ListProcessesResult{Processes: nil}, nil
+// killTrackedProcessesLocked SIGTERMs everything tracked in s.processes,
+// escalating to SIGKILL after a grace period — mirrors
+// netguard.killTrackedProcesses (internal/netguard/linux.go), which exists
+// for the same reason but reads its PID list from active.json instead.
+func (s *Server) killTrackedProcessesLocked() {
+	pids := make([]int, len(s.processes))
+	for i, p := range s.processes {
+		pids[i] = p.PID
+	}
+	s.processes = nil
+	if len(pids) == 0 {
+		return
+	}
+	for _, pid := range pids {
+		if proc, err := os.FindProcess(pid); err == nil {
+			_ = proc.Signal(syscall.SIGTERM)
+		}
+	}
+	time.Sleep(300 * time.Millisecond)
+	for _, pid := range pids {
+		if proc, err := os.FindProcess(pid); err == nil && proc.Signal(syscall.Signal(0)) == nil {
+			_ = proc.Signal(syscall.SIGKILL)
+		}
+	}
 }
 
+// handleListProcesses/handleKillProcess report from/act on s.processes,
+// which Exec (see exec.go) populates for run/run --tui/run --gui — the
+// TUI's own app launchers (internal/tui/appsview.go, internal/tui/runview.go)
+// aren't converted yet (see DAEMON_MIGRATION.md), so processes launched
+// from there still won't show up here.
+func (s *Server) handleListProcesses() (*rpc.ListProcessesResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]netguard.ProcessInfo, len(s.processes))
+	copy(out, s.processes)
+	return &rpc.ListProcessesResult{Processes: out}, nil
+}
+
+// handleKillProcess signals the tracked process directly (the daemon is
+// always root, so unlike internal/actions.KillProcess's client-side EPERM
+// dance for a process that might be running as a different user, this can
+// just send the signal) and lets the owning Exec goroutine's own
+// cmd.Wait()/untrackProcess reap and untrack it normally — no separate
+// bookkeeping needed here.
 func (s *Server) handleKillProcess(p rpc.KillProcessParams) (*rpc.KillProcessResult, error) {
-	return nil, fmt.Errorf("no tracked process matches %q", p.Target)
+	s.mu.Lock()
+	var found *netguard.ProcessInfo
+	for i := range s.processes {
+		if matchesProcessTarget(s.processes[i], p.Target) {
+			pi := s.processes[i]
+			found = &pi
+			break
+		}
+	}
+	s.mu.Unlock()
+
+	if found == nil {
+		return nil, fmt.Errorf("no tracked process matches %q", p.Target)
+	}
+
+	proc, err := os.FindProcess(found.PID)
+	if err != nil {
+		return nil, err
+	}
+	_ = proc.Signal(syscall.SIGTERM)
+	go func() {
+		time.Sleep(terminateGrace)
+		if proc.Signal(syscall.Signal(0)) == nil {
+			_ = proc.Signal(syscall.SIGKILL)
+		}
+	}()
+	return &rpc.KillProcessResult{Process: *found}, nil
+}
+
+func matchesProcessTarget(p netguard.ProcessInfo, target string) bool {
+	if pid, err := strconv.Atoi(target); err == nil && p.PID == pid {
+		return true
+	}
+	return p.Name == target
 }
