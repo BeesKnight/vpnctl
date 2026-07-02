@@ -1,3 +1,5 @@
 /vpnctl
+/vpnctld
 /packaging/vpnctl
+/packaging/vpnctld
 *.deb
