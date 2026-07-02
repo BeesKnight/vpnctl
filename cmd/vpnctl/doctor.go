@@ -34,6 +34,7 @@ func cmdDoctor(args []string) error {
 	results = append(results, checkEngineBinary("xray", "VLESS profiles")...)
 	results = append(results, checkEngineBinary("tun2socks", "VLESS profiles' TUN mode (paired with xray)")...)
 	results = append(results, checkAWG()...)
+	results = append(results, checkStaleWireGuardSocket())
 
 	results = append(results, checkResult{
 		name: "root/sudo",
@@ -101,6 +102,33 @@ func checkAWG() []checkResult {
 		results = append(results, checkResult{name: "wg-quick", ok: true, info: path + " (plain WireGuard fallback)"})
 	}
 	return results
+}
+
+// checkStaleWireGuardSocket flags the exact failure mode behind the A1
+// prerm bug: a leftover /var/run/wireguard/vpnctl-wg.sock from an
+// amneziawg-go/wg-quick process that never exited makes the next
+// `awg-quick up` fail with "UAPI listen error: unix socket in use", with no
+// obvious cause from that error alone. If a profile is genuinely active
+// right now, the socket is expected and not a problem.
+func checkStaleWireGuardSocket() checkResult {
+	sockPath := "/var/run/wireguard/" + netguard.WireGuardInterface + ".sock"
+	info, err := os.Lstat(sockPath)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return checkResult{name: "WireGuard UAPI socket", ok: true, info: "no stale socket at " + sockPath}
+	}
+
+	active := false
+	if status, err := netguard.NewLinuxEngine(false).Status(); err == nil {
+		active = status.Active
+	}
+	if active {
+		return checkResult{name: "WireGuard UAPI socket", ok: true, info: sockPath + " (in use by the active profile)"}
+	}
+	return checkResult{
+		name: "WireGuard UAPI socket",
+		ok:   false,
+		info: fmt.Sprintf("stale socket at %s with no active profile — a previous amneziawg-go/awg-quick process likely didn't exit; `awg-quick up` will fail with \"UAPI listen error: unix socket in use\" until it's removed (`vpnctl down`, or `rm` it by hand if that doesn't help)", sockPath),
+	}
 }
 
 func rootInfo() string {

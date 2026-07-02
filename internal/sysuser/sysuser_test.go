@@ -15,6 +15,20 @@ func TestRealHomeRespectsHOMEWhenNotUnderSudo(t *testing.T) {
 	}
 }
 
+func TestRealHomeVPNCTLStateHomeWinsOverSudoUser(t *testing.T) {
+	t.Setenv("VPNCTL_STATE_HOME", "/home/explicit-user")
+	t.Setenv("SUDO_USER", "root") // would resolve to /root if not overridden
+	t.Setenv("HOME", "/root")
+
+	home, err := RealHome()
+	if err != nil {
+		t.Fatalf("RealHome: %v", err)
+	}
+	if home != "/home/explicit-user" {
+		t.Errorf("expected VPNCTL_STATE_HOME to win, got %q", home)
+	}
+}
+
 func TestRanViaSudoReflectsSudoUserEnv(t *testing.T) {
 	t.Setenv("SUDO_USER", "")
 	if RanViaSudo() {

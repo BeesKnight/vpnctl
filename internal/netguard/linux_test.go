@@ -277,3 +277,42 @@ func TestSysctlBackupOnlyCapturedOnce(t *testing.T) {
 		t.Fatalf("expected pre-existing backup value %q to be preserved, got %q", "0", got.Values[ipForwardKey])
 	}
 }
+
+// TestTeardownClearsRestoredSysctlBackupValue is the regression test for A3:
+// once Teardown has actually restored ip_forward, the backup entry for it
+// must be dropped (and the file removed once empty) so a second, later
+// teardown doesn't re-apply an already-restored value and sysctl_backup.json
+// doesn't linger on disk forever.
+func TestTeardownClearsRestoredSysctlBackupValue(t *testing.T) {
+	withTempHome(t)
+
+	backup := &SysctlBackup{Values: map[string]string{ipForwardKey: "0"}}
+	if err := SaveSysctlBackup(backup); err != nil {
+		t.Fatal(err)
+	}
+
+	p := profile.Profile{Name: "switz", Server: "10.0.0.1", Port: 51820, Kind: profile.KindWireGuard}
+	e := NewLinuxEngine(true)
+	if _, err := e.Setup(p); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := e.Teardown(); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+
+	got, err := LoadSysctlBackup()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, known := got.Values[ipForwardKey]; known {
+		t.Errorf("expected %q to be cleared from the backup after Teardown restored it, got %v", ipForwardKey, got.Values)
+	}
+
+	path, err := sysctlBackupPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(path); err == nil {
+		t.Errorf("expected sysctl_backup.json to be removed once its only key was restored")
+	}
+}

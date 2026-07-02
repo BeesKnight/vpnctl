@@ -23,11 +23,26 @@ func Real() (*user.User, error) {
 }
 
 // RealHome returns the invoking (real, non-root-under-sudo) user's home
-// directory. Under sudo, $HOME is often left as root's (or unset), so this
-// looks up $SUDO_USER's home directly via the password database. Otherwise
-// it defers to os.UserHomeDir(), which honors $HOME like every other Unix
-// tool (and is what makes this overridable in tests).
+// directory.
+//
+// $VPNCTL_STATE_HOME, if set, wins outright: it lets a caller that already
+// knows the right directory (packaging/prerm, which found active.json by
+// walking /home/*/.local/state/vpnctl and /root/.local/state/vpnctl itself)
+// hand it over explicitly rather than trust this package to re-derive it.
+// This matters because dpkg runs maintainer scripts as root with a stripped,
+// non-interactive environment — $SUDO_USER lookup or $HOME can silently
+// resolve to the wrong account there, which previously made `vpnctl down`
+// find no active.json, exit 0, and leave the engine process/namespace
+// running (see packaging/prerm).
+//
+// Otherwise, under sudo, $HOME is often left as root's (or unset), so this
+// looks up $SUDO_USER's home directly via the password database. Failing
+// that it defers to os.UserHomeDir(), which honors $HOME like every other
+// Unix tool (and is what makes this overridable in tests).
 func RealHome() (string, error) {
+	if home := os.Getenv("VPNCTL_STATE_HOME"); home != "" {
+		return home, nil
+	}
 	if sudoUser := os.Getenv("SUDO_USER"); sudoUser != "" {
 		if u, err := user.Lookup(sudoUser); err == nil {
 			return u.HomeDir, nil

@@ -82,7 +82,10 @@ func Activate(name string) (profile.Profile, netguard.Status, engine.Handle, err
 		}
 	}
 
-	if state, err := netguard.LoadActiveState(); err == nil && state != nil {
+	_ = netguard.UpdateActiveState(func(state *netguard.ActiveState) (*netguard.ActiveState, error) {
+		if state == nil {
+			return nil, nil
+		}
 		state.EnginePID = handle.PID()
 		state.EngineKind = handle.Kind()
 		state.EngineLog = handle.LogPath()
@@ -90,8 +93,8 @@ func Activate(name string) (profile.Profile, netguard.Status, engine.Handle, err
 		if pid, err := spawnHealthCheckDaemon(); err == nil {
 			state.HealthPID = pid
 		}
-		_ = netguard.SaveActiveState(state)
-	}
+		return state, nil
+	})
 
 	return p, status, handle, nil
 }

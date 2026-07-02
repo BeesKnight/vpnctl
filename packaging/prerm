@@ -4,34 +4,97 @@
 # down` already does the full idempotent job (namespace/iptables teardown,
 # sysctl restore from its own backup, killing tracked engine/health-check/
 # run processes by PID) for whichever real user has it active — this script
-# just needs to find that user and set $SUDO_USER so vpnctl's own
-# real-user resolution (internal/sysuser) points at the right home
-# directory instead of root's.
+# just needs to find that user and hand vpnctl its home directory directly
+# via $VPNCTL_STATE_HOME (internal/sysuser.RealHome honors it above any
+# $SUDO_USER/$HOME lookup), since dpkg runs maintainer scripts as root with a
+# stripped, non-interactive environment where re-deriving the home directory
+# from $SUDO_USER alone has previously resolved to the wrong account and left
+# `vpnctl down` finding no active.json to act on.
+#
+# dpkg additionally resets $PATH to a fixed, minimal
+# "/usr/sbin:/usr/bin:/sbin:/bin" for every maintainer script it runs — this
+# is dpkg's own behavior, unconditional and unrelated to whatever PATH the
+# invoking shell/sudo session had. Since nfpm.yaml installs vpnctl to
+# /usr/local/bin (not one of those four directories), `command -v vpnctl`
+# here always failed under a real `apt remove`/`apt purge` even though it
+# succeeds when this script is run by hand — confirmed on a live stand by
+# instrumenting this file and diffing its actual dpkg-invoked $PATH against
+# an interactive one. That made the whole teardown below unreachable on
+# every real removal, regardless of the $SUDO_USER/$HOME fix. Resolving the
+# absolute install path directly (falling back to PATH for anyone who
+# installed vpnctl somewhere else) is what actually fixes it.
 set -u
 
-if ! command -v vpnctl >/dev/null 2>&1; then
+VPNCTL_BIN=/usr/local/bin/vpnctl
+if [ ! -x "$VPNCTL_BIN" ]; then
+  VPNCTL_BIN="$(command -v vpnctl 2>/dev/null || true)"
+fi
+if [ -z "$VPNCTL_BIN" ]; then
   exit 0
 fi
 
-teardown_for() {
-  user="$1"
-  state_dir="$2"
-  [ -f "$state_dir/active.json" ] || return 0
-  echo "vpnctl prerm: tearing down active profile for $user..."
-  if [ "$user" = "root" ]; then
-    vpnctl down || echo "vpnctl prerm: WARNING: teardown for root failed, continuing removal anyway"
-  else
-    SUDO_USER="$user" vpnctl down || echo "vpnctl prerm: WARNING: teardown for $user failed, continuing removal anyway"
+# force_teardown is a belt-and-suspenders cleanup that always runs after
+# `vpnctl down`, whether or not that call reported success: it kills exactly
+# the PIDs active.json recorded — never by process name/pattern, since an
+# unrelated sing-box or xray the user runs independently of vpnctl must never
+# be touched by a package purge (same invariant as killTrackedProcesses in
+# internal/netguard/linux.go) — and removes the namespace/UAPI socket if
+# they're still around. This is what keeps a purge from leaving vpnctl0 or an
+# orphaned engine process (holding /var/run/wireguard/vpnctl-wg.sock) behind
+# even if `vpnctl down`'s own state resolution fails for some reason.
+force_teardown() {
+  state_dir="$1"
+  active_json="$state_dir/active.json"
+
+  if [ -f "$active_json" ] && command -v jq >/dev/null 2>&1; then
+    pids="$(jq -r '
+      [.engine_pid, .helper_pid, .health_pid] + [(.processes // [])[].pid]
+      | .[] | select(. != null and . != 0)
+    ' "$active_json" 2>/dev/null)"
+    for pid in $pids; do
+      kill "$pid" 2>/dev/null || true
+    done
+    if [ -n "$pids" ]; then
+      sleep 0.3
+      for pid in $pids; do
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+      done
+    fi
+  fi
+
+  if command -v ip >/dev/null 2>&1 && ip netns list 2>/dev/null | grep -q '^vpnctl0\b'; then
+    echo "vpnctl prerm: namespace vpnctl0 still present after teardown, removing it"
+    ip netns del vpnctl0 2>/dev/null || true
+  fi
+
+  if [ -S /var/run/wireguard/vpnctl-wg.sock ]; then
+    echo "vpnctl prerm: stale WireGuard UAPI socket found, removing it"
+    rm -f /var/run/wireguard/vpnctl-wg.sock
   fi
 }
 
-[ -d /root/.local/state/vpnctl ] && teardown_for root /root/.local/state/vpnctl
+teardown_for() {
+  user="$1"
+  home="$2"
+  state_dir="$home/.local/state/vpnctl"
+  [ -f "$state_dir/active.json" ] || return 0
+
+  echo "vpnctl prerm: tearing down active profile for $user..."
+  if [ "$user" = "root" ]; then
+    VPNCTL_STATE_HOME="$home" "$VPNCTL_BIN" down || echo "vpnctl prerm: WARNING: teardown for root failed, continuing removal anyway"
+  else
+    VPNCTL_STATE_HOME="$home" SUDO_USER="$user" "$VPNCTL_BIN" down || echo "vpnctl prerm: WARNING: teardown for $user failed, continuing removal anyway"
+  fi
+  force_teardown "$state_dir"
+}
+
+[ -d /root/.local/state/vpnctl ] && teardown_for root /root
 
 for state_dir in /home/*/.local/state/vpnctl; do
   [ -d "$state_dir" ] || continue
-  rest="${state_dir#/home/}"
-  user="${rest%%/*}"
-  teardown_for "$user" "$state_dir"
+  home="${state_dir%/.local/state/vpnctl}"
+  user="${home#/home/}"
+  teardown_for "$user" "$home"
 done
 
 exit 0

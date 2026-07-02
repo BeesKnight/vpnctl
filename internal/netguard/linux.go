@@ -187,7 +187,7 @@ func (e *LinuxEngine) Setup(p profile.Profile) (Status, error) {
 		Protocol:     proto,
 		Since:        status.Since,
 	}
-	if err := SaveActiveState(state); err != nil {
+	if err := WriteActiveState(state); err != nil {
 		return Status{}, fmt.Errorf("saving state: %w", err)
 	}
 
@@ -341,7 +341,7 @@ func (e *LinuxEngine) Teardown() error {
 		return fmt.Errorf("restoring ip_forward: %w", err)
 	}
 
-	return ClearActiveState()
+	return ClearActiveStateLocked()
 }
 
 // teardownNetwork removes the namespace and veth pair. Idempotent: missing
@@ -413,54 +413,61 @@ func (e *LinuxEngine) Status() (Status, error) {
 // UpdateEndpoint implements Engine. Called periodically by the health-check
 // to re-resolve the server hostname and, if it changed, swap the
 // point-to-point ACCEPT/NAT rules in place without ever dropping the
-// kill-switch or tearing down the namespace.
+// kill-switch or tearing down the namespace. The whole read-resolve-swap-save
+// sequence runs inside UpdateActiveState's lock, so a concurrent `vpnctl
+// run`/`kill` touching active.json (AddProcess/RemoveProcess) can't
+// interleave with it and lose a write either way.
 func (e *LinuxEngine) UpdateEndpoint(p profile.Profile) (bool, string, error) {
-	state, err := LoadActiveState()
+	var changed bool
+	var resultIP string
+	err := UpdateActiveState(func(state *ActiveState) (*ActiveState, error) {
+		if state == nil {
+			return nil, fmt.Errorf("no active profile")
+		}
+
+		newIP, err := resolveIP(p.Server)
+		if err != nil {
+			return nil, fmt.Errorf("resolving server: %w", err)
+		}
+		resultIP = state.ResolvedIP
+		if newIP == state.ResolvedIP {
+			return state, nil
+		}
+
+		proto := protocolFor(p.Kind)
+
+		// Remove the old point-to-point rules (both namespace and host)
+		// before installing new ones — never have both old and new open at
+		// once for longer than this call, and never have neither open
+		// (fail-closed means a health-check race must err on "namespace
+		// still locked", not "briefly wide open").
+		_ = e.nsExecRun("iptables", "-D", "OUTPUT", "-p", proto, "-d", state.ResolvedIP, "--dport", strconv.Itoa(state.ResolvedPort), "-j", "ACCEPT")
+		_ = e.nsExecRun("iptables", "-D", "INPUT", "-p", proto, "-s", state.ResolvedIP, "--sport", strconv.Itoa(state.ResolvedPort), "-j", "ACCEPT")
+		if err := e.removeHostForwarding(state.ResolvedIP, state.ResolvedPort, proto); err != nil {
+			return nil, err
+		}
+
+		if err := e.nsExecRun("iptables", "-A", "OUTPUT", "-p", proto, "-d", newIP, "--dport", strconv.Itoa(p.Port), "-j", "ACCEPT"); err != nil {
+			return nil, err
+		}
+		if err := e.nsExecRun("iptables", "-A", "INPUT", "-p", proto, "-s", newIP, "--sport", strconv.Itoa(p.Port), "-j", "ACCEPT"); err != nil {
+			return nil, err
+		}
+		if err := e.allowHostForwarding(newIP, p.Port, proto); err != nil {
+			return nil, err
+		}
+
+		state.ResolvedIP = newIP
+		state.ResolvedPort = p.Port
+		state.Protocol = proto
+		changed = true
+		resultIP = newIP
+		return state, nil
+	})
 	if err != nil {
 		return false, "", err
 	}
-	if state == nil {
-		return false, "", fmt.Errorf("no active profile")
-	}
-
-	newIP, err := resolveIP(p.Server)
-	if err != nil {
-		return false, "", fmt.Errorf("resolving server: %w", err)
-	}
-	if newIP == state.ResolvedIP {
-		return false, state.ResolvedIP, nil
-	}
-
-	proto := protocolFor(p.Kind)
-
-	// Remove the old point-to-point rules (both namespace and host) before
-	// installing new ones — never have both old and new open at once for
-	// longer than this call, and never have neither open (fail-closed means
-	// a health-check race must err on "namespace still locked", not "briefly
-	// wide open").
-	_ = e.nsExecRun("iptables", "-D", "OUTPUT", "-p", proto, "-d", state.ResolvedIP, "--dport", strconv.Itoa(state.ResolvedPort), "-j", "ACCEPT")
-	_ = e.nsExecRun("iptables", "-D", "INPUT", "-p", proto, "-s", state.ResolvedIP, "--sport", strconv.Itoa(state.ResolvedPort), "-j", "ACCEPT")
-	if err := e.removeHostForwarding(state.ResolvedIP, state.ResolvedPort, proto); err != nil {
-		return false, "", err
-	}
-
-	if err := e.nsExecRun("iptables", "-A", "OUTPUT", "-p", proto, "-d", newIP, "--dport", strconv.Itoa(p.Port), "-j", "ACCEPT"); err != nil {
-		return false, "", err
-	}
-	if err := e.nsExecRun("iptables", "-A", "INPUT", "-p", proto, "-s", newIP, "--sport", strconv.Itoa(p.Port), "-j", "ACCEPT"); err != nil {
-		return false, "", err
-	}
-	if err := e.allowHostForwarding(newIP, p.Port, proto); err != nil {
-		return false, "", err
-	}
-
-	state.ResolvedIP = newIP
-	state.ResolvedPort = p.Port
-	state.Protocol = proto
-	if err := SaveActiveState(state); err != nil {
-		return false, "", err
-	}
-	return true, newIP, nil
+	return changed, resultIP, nil
 }
 
 // netnsPath is where `ip netns add` creates the bind-mounted namespace
@@ -571,7 +578,16 @@ func (e *LinuxEngine) restoreIPForward() error {
 	if !known {
 		return nil
 	}
-	return e.runner.Run("sysctl", "-w", ipForwardKey+"="+orig)
+	if err := e.runner.Run("sysctl", "-w", ipForwardKey+"="+orig); err != nil {
+		return err
+	}
+	// Once restored, drop the key from the backup so it stays a true record
+	// of "values still owed to the host" — a second teardown (e.g. prerm
+	// running `vpnctl down` after the user already ran it by hand) then sees
+	// !known and no-ops instead of writing a value that's already been put
+	// back, and sysctl_backup.json stops lingering on disk once every value
+	// it recorded has been restored.
+	return ClearSysctlBackupValue(ipForwardKey)
 }
 
 func processAlive(pid int) bool {
