@@ -20,7 +20,6 @@ type Type string
 
 const (
 	TypeCLI Type = "cli"
-	TypeTUI Type = "tui"
 	TypeGUI Type = "gui"
 )
 
@@ -28,18 +27,15 @@ const (
 // directly (real streaming — progress bars, live output — not buffered),
 // and returns its exit code. The process is tracked for the duration of the
 // call so `vpnctl ps`/the "atomic switch" guard can see it.
+//
+// Still used by internal/actions.TestConnectivity (the file-backed model
+// the TUI still runs on — see DAEMON_MIGRATION.md); `vpnctl run` itself
+// moved to vpnctlclient.Exec, which allocates a real PTY server-side for
+// `--tui` instead of directly inheriting a terminal fd the way this
+// function does, since a detached daemon has no terminal of its own to
+// inherit from. That's also why there's no TUI() here anymore.
 func CLI(ng netguard.Engine, argv []string) (int, error) {
 	return foreground(ng, argv, TypeCLI)
-}
-
-// TUI runs argv inside the active namespace with a full terminal takeover —
-// used by the non-interactive `vpnctl run --tui` (identical wiring to CLI:
-// stdio connected directly, nothing intercepted). When launched from
-// *inside* the bubbletea TUI itself, the TUI screen instead uses
-// tea.ExecProcess, which suspends rendering before calling this same
-// underlying mechanism (see internal/tui).
-func TUI(ng netguard.Engine, argv []string) (int, error) {
-	return foreground(ng, argv, TypeTUI)
 }
 
 func foreground(ng netguard.Engine, argv []string, kind Type) (int, error) {
@@ -90,7 +86,7 @@ func GUI(ng netguard.Engine, argv []string) (int, error) {
 	}
 
 	cmd, err := ng.Command(argv[0], argv[1:], netguard.ExecOptions{
-		Env:       resolveGUIEnv(uid),
+		Env:       ResolveGUIEnv(uid),
 		DropToUID: &uid,
 		DropToGID: &gid,
 	})

@@ -3,9 +3,8 @@
 // ~/.config/vpnctl/profiles itself — see internal/profile) and sends
 // already-resolved requests over the Unix socket defined in internal/rpc.
 //
-// Callers needing daemon-owned functionality not covered here yet (process
-// launching for `vpnctl run`/the TUI's app launchers) should keep using
-// internal/actions directly for now — see DAEMON_MIGRATION.md.
+// The TUI's own process launchers (internal/tui/appsview.go, runview.go)
+// aren't converted to this package yet — see DAEMON_MIGRATION.md.
 package vpnctlclient
 
 import (

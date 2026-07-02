@@ -78,11 +78,11 @@ Usage:
   vpnctl down                  deactivate the active profile, via vpnctld — no sudo needed
   vpnctl status                show active profile / kill-switch state, via vpnctld
   vpnctl test                  test external connectivity through the active profile, via vpnctld
-  vpnctl run -- <cmd...>       run a CLI command through the active profile (blocking) — needs sudo
-  vpnctl run --tui -- <cmd...> run an interactive TUI program (terminal takeover) — needs sudo
-  vpnctl run --gui -- <cmd...> run a GUI program detached, through the active profile — needs sudo
-  vpnctl ps                    list processes launched through the active profile
-  vpnctl kill <pid|name>       kill a process launched through the active profile
+  vpnctl run -- <cmd...>       run a CLI command through the active profile (blocking), via vpnctld — no sudo needed
+  vpnctl run --tui -- <cmd...> run an interactive TUI program (terminal takeover), via vpnctld — no sudo needed
+  vpnctl run --gui -- <cmd...> run a GUI program detached, through the active profile, via vpnctld — no sudo needed
+  vpnctl ps                    list processes launched through the active profile, via vpnctld
+  vpnctl kill <pid|name>       kill a process launched through the active profile, via vpnctld
   vpnctl import --sub <url>    import profiles from a subscription link
   vpnctl import --wg <path>    import a WireGuard/AmneziaWG .conf file
   vpnctl insecure <profile>    disable TLS certificate verification for one VLESS/Hysteria2 profile
@@ -90,9 +90,10 @@ Usage:
   vpnctl doctor                check system dependencies and configuration
   vpnctl help                  show this message
 
-use/down/status/test/ps/kill talk to the vpnctld daemon (must be running —
-see DAEMON_MIGRATION.md). The bare TUI and run still touch networking
-directly and need root, until they move behind vpnctld too: a profile
-activated via the daemon won't show up in the TUI yet, and vice versa —
-don't mix the two in the same session.`)
+Every command above except the bare TUI talks to the vpnctld daemon (must
+be running — see DAEMON_MIGRATION.md) and needs no sudo, only access to its
+socket. Only the bare TUI (no arguments) still touches networking directly
+and needs root, until it moves behind vpnctld too: a profile activated via
+the daemon won't show up in the TUI yet, and vice versa — don't mix the
+two in the same session.`)
 }

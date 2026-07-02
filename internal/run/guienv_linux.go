@@ -22,7 +22,7 @@ var guiEnvKeys = []string{
 	"DBUS_SESSION_BUS_ADDRESS", "PULSE_SERVER",
 }
 
-// resolveGUIEnv gathers those variables for the real (non-root) user vpnctl
+// ResolveGUIEnv gathers those variables for the real (non-root) user vpnctl
 // is acting on behalf of. vpnctl normally runs under `sudo`, which — unless
 // invoked with `sudo -E` or explicit env_keep — strips exactly these
 // variables before vpnctl ever sees them (this is the "не полагаться на
@@ -32,7 +32,12 @@ var guiEnvKeys = []string{
 // WAYLAND_DISPLAY set — typically the user's X/Wayland session or desktop
 // shell — and borrows its environment. Falls back to the current process's
 // environment, then to conventional single-seat-desktop defaults.
-func resolveGUIEnv(uid int) []string {
+//
+// Exported: cmd/vpnctl/run.go's `vpnctl run --gui` path (vpnctlclient.Exec)
+// needs the exact same resolution when building rpc.ExecParams.Env, since
+// the daemon has no desktop session of its own to inherit anything from
+// either.
+func ResolveGUIEnv(uid int) []string {
 	found := scanProcEnvForUser(uid)
 
 	env := map[string]string{}
