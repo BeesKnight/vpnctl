@@ -1,0 +1,165 @@
+// Package vpnctld is the privileged daemon (vpnctld) that owns the netns,
+// iptables kill-switch, and tunnel engine process for the whole machine —
+// a single system-wide instance, not one per user, matching the reality
+// that only one profile is ever active system-wide today (the namespace
+// name is fixed). vpnctl (CLI/TUI) talks to it over a Unix socket using
+// internal/rpc rather than touching netguard/the engine directly.
+//
+// This package currently covers only the non-streaming commands (use,
+// down, status, test, ps, kill) — see DAEMON_MIGRATION.md for what's
+// deliberately not here yet (process launching/PTY proxying for `run` and
+// the TUI, systemd/packaging integration).
+package vpnctld
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"net"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/BeesKnight/vpnctl/internal/engine"
+	"github.com/BeesKnight/vpnctl/internal/netguard"
+	"github.com/BeesKnight/vpnctl/internal/profile"
+	"github.com/BeesKnight/vpnctl/internal/rpc"
+)
+
+// connDeadline bounds how long a single request/response exchange may take
+// end to end, so a misbehaving or hung client can't tie up a connection
+// (and, since handling is one-at-a-time per the mutex, the daemon) forever.
+// TestConnectivity's own curl --max-time is 10s, so this leaves headroom.
+const connDeadline = 20 * time.Second
+
+// activeState is the daemon's single in-memory record of the currently
+// active profile — the direct in-process replacement for netguard's
+// file-backed ActiveState (internal/netguard/state.go), which existed only
+// because multiple independent CLI processes needed to coordinate through
+// a file. A single long-lived daemon process has no such need: a plain
+// mutex over this struct is enough, and it can hold the live engine.Handle
+// directly instead of having to reconstruct one from a PID recorded on disk.
+type activeState struct {
+	profile    profile.Profile
+	status     netguard.Status // authoritative snapshot; healthCheckLoop keeps ResolvedIP current
+	handle     engine.Handle
+	healthStop context.CancelFunc
+}
+
+// Server is vpnctld's connection-handling and state-owning core.
+type Server struct {
+	mu     sync.Mutex
+	ng     netguard.Engine
+	active *activeState // nil when no profile is active
+
+	logger *log.Logger
+}
+
+// New creates a Server backed by a real (non-dry-run) Linux network engine.
+func New(logger *log.Logger) *Server {
+	return NewWithEngine(netguard.NewLinuxEngine(false), logger)
+}
+
+// NewWithEngine creates a Server backed by an arbitrary netguard.Engine —
+// the seam unit tests use to inject a dry-run engine (netguard.NewLinuxEngine(true)),
+// the same pattern internal/netguard's own tests already use to assert on
+// generated ip/iptables commands without touching the host.
+func NewWithEngine(ng netguard.Engine, logger *log.Logger) *Server {
+	if logger == nil {
+		logger = log.New(os.Stderr, "vpnctld: ", log.LstdFlags)
+	}
+	return &Server{
+		ng:     ng,
+		logger: logger,
+	}
+}
+
+// Serve accepts connections on ln, handling each on its own goroutine
+// (so a slow TestConnectivity doesn't block an unrelated Status/Ping from
+// even being read — only the state-touching work inside each handler is
+// serialized, via Server.mu) until ctx is canceled.
+func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
+	go func() {
+		<-ctx.Done()
+		_ = ln.Close()
+	}()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-ctx.Done():
+				return nil
+			default:
+				return err
+			}
+		}
+		go s.handleConn(conn)
+	}
+}
+
+// Shutdown deactivates any active profile (tearing down the namespace/
+// kill-switch/engine cleanly, same as a client-initiated Deactivate) so a
+// stopped daemon never leaves network state behind for the next start —
+// this is what packaging/prerm's whole force_teardown dance existed to
+// paper over in the file-based model.
+func (s *Server) Shutdown() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.deactivateLocked(); err != nil {
+		s.logger.Printf("shutdown: deactivating: %v", err)
+	}
+}
+
+func (s *Server) handleConn(conn net.Conn) {
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(connDeadline))
+
+	var req rpc.Request
+	if err := rpc.ReadMessage(conn, &req); err != nil {
+		return // client disconnected or sent garbage; nothing to reply to
+	}
+
+	resp := rpc.Response{ID: req.ID}
+	if req.APIVersion != rpc.APIVersion {
+		resp.Error = fmt.Sprintf("protocol version mismatch: client=%q daemon=%q — rebuild vpnctl/vpnctld to matching versions", req.APIVersion, rpc.APIVersion)
+	} else if result, err := s.dispatch(req.Method, req.Params); err != nil {
+		resp.Error = err.Error()
+	} else if data, err := json.Marshal(result); err != nil {
+		resp.Error = fmt.Sprintf("marshaling result: %v", err)
+	} else {
+		resp.Result = data
+	}
+
+	_ = rpc.WriteMessage(conn, &resp)
+}
+
+func (s *Server) dispatch(method string, params json.RawMessage) (any, error) {
+	switch method {
+	case rpc.MethodPing:
+		return s.handlePing()
+	case rpc.MethodActivate:
+		var p rpc.ActivateParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("decoding params: %w", err)
+		}
+		return s.handleActivate(p)
+	case rpc.MethodDeactivate:
+		return s.handleDeactivate()
+	case rpc.MethodStatus:
+		return s.handleStatus()
+	case rpc.MethodTestConnectivity:
+		return s.handleTestConnectivity()
+	case rpc.MethodListProcesses:
+		return s.handleListProcesses()
+	case rpc.MethodKillProcess:
+		var p rpc.KillProcessParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("decoding params: %w", err)
+		}
+		return s.handleKillProcess(p)
+	default:
+		return nil, fmt.Errorf("unknown method %q", method)
+	}
+}

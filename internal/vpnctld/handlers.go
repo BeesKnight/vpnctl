@@ -1,0 +1,257 @@
+package vpnctld
+
+import (
+	"bytes"
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"os/exec"
+	"strings"
+	"time"
+
+	"github.com/BeesKnight/vpnctl/internal/engine"
+	"github.com/BeesKnight/vpnctl/internal/netguard"
+	"github.com/BeesKnight/vpnctl/internal/profile"
+	"github.com/BeesKnight/vpnctl/internal/rpc"
+)
+
+// engineStartupGrace/logTailLines/tailLogFile mirror the unexported
+// internal/actions helpers of the same purpose (actions.go) — duplicated
+// rather than imported, since internal/actions stays coupled to the
+// file-backed active.json model for the TUI/`run` until they migrate too
+// (see DAEMON_MIGRATION.md); pulling vpnctld into that dependency now would
+// be backwards.
+const (
+	engineStartupGrace = 300 * time.Millisecond
+	logTailLines       = 5
+)
+
+func tailLogFile(path string, n int) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	lines := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, "\n")
+}
+
+// profileFromParams reconstructs a profile.Profile from what the client
+// sent, entirely from in-memory data — the daemon never touches any user's
+// ~/.config/vpnctl/profiles itself. Re-parsing WGRaw (rather than trusting
+// separately-sent Server/Port fields) reuses profile.ParseWireGuard's
+// existing validation and keeps this from drifting out of sync with it.
+func profileFromParams(p rpc.ActivateParams) (profile.Profile, error) {
+	prof := profile.Profile{
+		Name:   p.Name,
+		Kind:   profile.Kind(p.Kind),
+		Family: profile.Family(p.Family),
+	}
+
+	switch prof.Family {
+	case profile.FamilyWG:
+		wg, err := profile.ParseWireGuard(p.WGRaw)
+		if err != nil {
+			return profile.Profile{}, fmt.Errorf("parsing WireGuard config: %w", err)
+		}
+		prof.WG = wg
+		prof.Server = wg.Peer.Host()
+		prof.Port = wg.Peer.PortNum()
+	case profile.FamilyProxy:
+		if p.Outbound == nil {
+			return profile.Profile{}, fmt.Errorf("proxy profile %q has no outbound config", p.Name)
+		}
+		prof.Outbound = p.Outbound
+		prof.Server, _ = p.Outbound["server"].(string)
+		switch v := p.Outbound["server_port"].(type) {
+		case float64:
+			prof.Port = int(v)
+		case int:
+			prof.Port = v
+		}
+	default:
+		return profile.Profile{}, fmt.Errorf("unknown profile family %q", p.Family)
+	}
+	return prof, nil
+}
+
+func (s *Server) handlePing() (*rpc.PingResult, error) {
+	return &rpc.PingResult{Version: rpc.APIVersion}, nil
+}
+
+// handleActivate mirrors internal/actions.Activate's sequencing (kill-switch
+// namespace first, then the engine inside it, then a startup grace period
+// for engines with a persistent foreground process) but keeps the result in
+// s.active instead of writing active.json, and starts the health-check as
+// a cancelable goroutine instead of a detached child process.
+func (s *Server) handleActivate(p rpc.ActivateParams) (*rpc.ActivateResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.active != nil {
+		return nil, fmt.Errorf("profile %q is already active — deactivate it first", s.active.profile.Name)
+	}
+
+	prof, err := profileFromParams(p)
+	if err != nil {
+		return nil, err
+	}
+
+	status, err := s.ng.Setup(prof)
+	if err != nil {
+		return nil, fmt.Errorf("setting up kill-switch: %w", err)
+	}
+
+	handle, err := engine.Start(s.ng, prof)
+	if err != nil {
+		_ = s.ng.Teardown()
+		return nil, fmt.Errorf("starting engine: %w", err)
+	}
+
+	// A successful fork+exec only means the process launched, not that it
+	// stayed up — give a persistent foreground engine (sing-box/xray) a real
+	// chance to crash before reporting the activation a success. WireGuard/
+	// AmneziaWG has no persistent process to wait on (PID()==0), so it's
+	// exempt, same as actions.Activate.
+	if handle.PID() != 0 {
+		time.Sleep(engineStartupGrace)
+		if healthy, herr := handle.Healthy(); herr != nil || !healthy {
+			_ = handle.Stop()
+			_ = s.ng.Teardown()
+			return nil, fmt.Errorf("engine failed to start (see %s):\n%s", handle.LogPath(), tailLogFile(handle.LogPath(), logTailLines))
+		}
+	}
+
+	hctx, cancel := context.WithCancel(context.Background())
+	s.active = &activeState{
+		profile:    prof,
+		status:     status,
+		handle:     handle,
+		healthStop: cancel,
+	}
+	go s.healthCheckLoop(hctx, prof)
+
+	return &rpc.ActivateResult{
+		Status:     status,
+		EngineKind: handle.Kind(),
+		EngineLog:  handle.LogPath(),
+	}, nil
+}
+
+func (s *Server) handleDeactivate() (*struct{}, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return &struct{}{}, s.deactivateLocked()
+}
+
+// deactivateLocked stops the engine (if any) and tears down the namespace.
+// Unlike actions.Deactivate (which returns early, skipping Teardown
+// entirely, if stopping the engine fails), Teardown always runs regardless
+// of whether Stop succeeded — found empirically on a live stand: a
+// systemd stop with the default KillMode=control-group can SIGTERM the
+// daemon's own in-flight `awg-quick down` child (spawned by Stop) before
+// it finishes, which used to leave the namespace/kill-switch orphaned
+// exactly like the A1 bug this whole project started by fixing. Teardown
+// itself already kills tracked PIDs and removes the namespace/veth
+// unconditionally, so it's the right fallback even when the graceful Stop
+// didn't complete.
+func (s *Server) deactivateLocked() error {
+	var stopErr error
+	if s.active != nil {
+		s.active.healthStop()
+		handle := s.active.handle
+		s.active = nil
+		if err := handle.Stop(); err != nil {
+			stopErr = fmt.Errorf("stopping engine: %w", err)
+		}
+	}
+	if err := s.ng.Teardown(); err != nil {
+		if stopErr != nil {
+			return fmt.Errorf("%w; also failed tearing down: %v", stopErr, err)
+		}
+		return err
+	}
+	return stopErr
+}
+
+// handleStatus reports from the daemon's own in-memory s.active rather than
+// netguard.Engine.Status() — that method's Active/ProfileName/etc. are
+// computed by reading active.json (internal/netguard/linux.go's Status()),
+// which the daemon deliberately never writes; the daemon's in-memory state
+// is now the authoritative source of truth instead, with no file to drift
+// out of sync with it.
+func (s *Server) handleStatus() (*rpc.StatusResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.active == nil {
+		return &rpc.StatusResult{Status: netguard.Status{Active: false}}, nil
+	}
+
+	status := s.active.status
+	status.Active = true
+	healthy, err := s.active.handle.Healthy()
+	if err != nil {
+		healthy = false
+	}
+	status.EngineHealthy = healthy
+	return &rpc.StatusResult{Status: status, Healthy: healthy}, nil
+}
+
+// handleTestConnectivity runs curl inside the active namespace and
+// captures its combined output, returning it whole once curl exits rather
+// than streaming — curl already runs -s -S (silent, errors only), so
+// there's no live progress meter to preserve by keeping the connection
+// open the whole time.
+func (s *Server) handleTestConnectivity() (*rpc.TestConnectivityResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.active == nil {
+		return nil, fmt.Errorf("no active profile — activate one first")
+	}
+
+	curlArgs := []string{"-s", "-S", "--max-time", "10", "-w", "\nhttp_status=%{http_code} time=%{time_total}s\n", "https://ifconfig.me/ip"}
+	cmd, err := s.ng.Command("curl", curlArgs, netguard.ExecOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	start := time.Now()
+	runErr := cmd.Run()
+	elapsed := time.Since(start)
+
+	exitCode := 0
+	if runErr != nil {
+		var exitErr *exec.ExitError
+		if errors.As(runErr, &exitErr) {
+			exitCode = exitErr.ExitCode()
+		} else {
+			return nil, fmt.Errorf("running curl: %w", runErr)
+		}
+	}
+
+	return &rpc.TestConnectivityResult{
+		ExitCode:  exitCode,
+		ElapsedMS: elapsed.Milliseconds(),
+		Output:    out.String(),
+	}, nil
+}
+
+// handleListProcesses/handleKillProcess are real RPCs already, but process
+// tracking has nowhere to be populated from until `vpnctl run`/the TUI's
+// app launchers move behind the daemon too (see DAEMON_MIGRATION.md) — an
+// empty list here is accurate for what the daemon manages today, not a stub.
+func (s *Server) handleListProcesses() (*rpc.ListProcessesResult, error) {
+	return &rpc.ListProcessesResult{Processes: nil}, nil
+}
+
+func (s *Server) handleKillProcess(p rpc.KillProcessParams) (*rpc.KillProcessResult, error) {
+	return nil, fmt.Errorf("no tracked process matches %q", p.Target)
+}
