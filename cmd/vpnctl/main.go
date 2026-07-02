@@ -38,6 +38,8 @@ func main() {
 		err = cmdRun(args)
 	case "import":
 		err = cmdImport(args)
+	case "insecure":
+		err = cmdInsecure(args)
 	case "ps":
 		err = cmdPs(args)
 	case "kill":
@@ -83,6 +85,8 @@ Usage:
   vpnctl kill <pid|name>       kill a process launched through the active profile
   vpnctl import --sub <url>    import profiles from a subscription link
   vpnctl import --wg <path>    import a WireGuard/AmneziaWG .conf file
+  vpnctl insecure <profile>    disable TLS certificate verification for one VLESS/Hysteria2 profile
+  vpnctl insecure <profile> off  re-enable TLS certificate verification for it
   vpnctl doctor                check system dependencies and configuration
   vpnctl help                  show this message`)
 }
