@@ -8,7 +8,7 @@ import (
 )
 
 // flockExclusive/funlock on non-Linux platforms (placeholder for a future
-// Windows port, matching internal/run/guienv_other.go's approach): there is
+// Windows port, matching internal/sysuser/guienv_other.go's approach): there is
 // no flock(2) here, so this only serializes within this one process via an
 // in-memory mutex. That's strictly weaker than the Linux implementation
 // (it can't stop a second OS process from racing), but there is no second

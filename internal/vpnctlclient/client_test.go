@@ -151,6 +151,19 @@ func TestActivateResolvesProfileAndActivatesThroughDaemon(t *testing.T) {
 	}
 }
 
+func TestGetLogTailReturnsEmptyWithNothingActive(t *testing.T) {
+	withProfile(t)
+	startTestDaemon(t)
+
+	text, err := GetLogTail(5)
+	if err != nil {
+		t.Fatalf("GetLogTail: %v", err)
+	}
+	if text != "" {
+		t.Errorf("expected empty log tail with nothing active, got %q", text)
+	}
+}
+
 func TestActivateUnknownProfileFailsBeforeContactingDaemon(t *testing.T) {
 	withProfile(t)
 	// Deliberately don't start a daemon — if Activate tries to resolve a

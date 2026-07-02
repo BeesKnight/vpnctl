@@ -42,9 +42,9 @@ type ExecParams struct {
 	Mode ExecMode `json:"mode"`
 	Argv []string `json:"argv"`
 	// Env/DropUID/DropGID mirror netguard.ExecOptions, for the gui mode's
-	// desktop-passthrough + privilege-drop (see internal/run.GUI, which
-	// this replaces for the cmd/vpnctl/run.go path only — internal/tui's
-	// own GUI launcher isn't converted yet).
+	// desktop-passthrough + privilege-drop (see internal/sysuser.ResolveGUIEnv,
+	// used by both cmd/vpnctl/run.go's --gui path and internal/tui's own
+	// GUI launcher to build these).
 	Env     []string `json:"env,omitempty"`
 	DropUID *int     `json:"drop_uid,omitempty"`
 	DropGID *int     `json:"drop_gid,omitempty"`

@@ -262,6 +262,51 @@ func TestActivateStatusDeactivateRoundTrip(t *testing.T) {
 	}
 }
 
+func TestGetLogTailWithNoActiveProfileReturnsEmpty(t *testing.T) {
+	sock := startTestServer(t)
+	resp := call(t, sock, rpc.MethodGetLogTail, rpc.GetLogTailParams{Lines: 5})
+	if resp.Error != "" {
+		t.Fatalf("GetLogTail: %s", resp.Error)
+	}
+	var result rpc.GetLogTailResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshaling GetLogTailResult: %v", err)
+	}
+	if result.Text != "" {
+		t.Errorf("expected empty text with no active profile, got %q", result.Text)
+	}
+}
+
+func TestGetLogTailReturnsRecentLines(t *testing.T) {
+	sock := startTestServer(t)
+
+	activateResp := call(t, sock, rpc.MethodActivate, rpc.ActivateParams{
+		Name: "switz", Kind: string(profile.KindWireGuard), Family: string(profile.FamilyWG), WGRaw: testWGConf,
+	})
+	if activateResp.Error != "" {
+		t.Fatalf("Activate: %s", activateResp.Error)
+	}
+	var activateResult rpc.ActivateResult
+	if err := json.Unmarshal(activateResp.Result, &activateResult); err != nil {
+		t.Fatalf("unmarshaling ActivateResult: %v", err)
+	}
+	if err := os.WriteFile(activateResult.EngineLog, []byte("line one\nline two\nline three\n"), 0o644); err != nil {
+		t.Fatalf("writing to engine log: %v", err)
+	}
+
+	resp := call(t, sock, rpc.MethodGetLogTail, rpc.GetLogTailParams{Lines: 2})
+	if resp.Error != "" {
+		t.Fatalf("GetLogTail: %s", resp.Error)
+	}
+	var result rpc.GetLogTailResult
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("unmarshaling GetLogTailResult: %v", err)
+	}
+	if result.Text != "line two\nline three" {
+		t.Errorf("expected the last 2 lines, got %q", result.Text)
+	}
+}
+
 func TestKillProcessOnEmptyListReportsNotFound(t *testing.T) {
 	sock := startTestServer(t)
 	resp := call(t, sock, rpc.MethodKillProcess, rpc.KillProcessParams{Target: "123"})

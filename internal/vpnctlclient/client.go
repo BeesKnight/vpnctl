@@ -132,7 +132,7 @@ func TestConnectivity() (rpc.TestConnectivityResult, error) {
 }
 
 // ListProcesses lists processes tracked as launched through the active
-// profile. Always empty for now — see internal/rpc.ListProcessesResult.
+// profile.
 func ListProcesses() ([]netguard.ProcessInfo, error) {
 	var result rpc.ListProcessesResult
 	err := call(rpc.MethodListProcesses, nil, &result)
@@ -144,4 +144,14 @@ func KillProcess(target string) (netguard.ProcessInfo, error) {
 	var result rpc.KillProcessResult
 	err := call(rpc.MethodKillProcess, rpc.KillProcessParams{Target: target}, &result)
 	return result.Process, err
+}
+
+// GetLogTail returns the last n lines of the active engine's log — for the
+// TUI's status panel, which used to read active.json/EngineLog directly
+// off disk (see internal/tui/mainview.go's viewLogs) but no longer can:
+// vpnctld's own state dir is root-only.
+func GetLogTail(lines int) (string, error) {
+	var result rpc.GetLogTailResult
+	err := call(rpc.MethodGetLogTail, rpc.GetLogTailParams{Lines: lines}, &result)
+	return result.Text, err
 }

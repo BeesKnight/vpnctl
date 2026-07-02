@@ -172,6 +172,12 @@ func (s *Server) dispatch(method string, params json.RawMessage) (any, error) {
 			return nil, fmt.Errorf("decoding params: %w", err)
 		}
 		return s.handleKillProcess(p)
+	case rpc.MethodGetLogTail:
+		var p rpc.GetLogTailParams
+		if err := json.Unmarshal(params, &p); err != nil {
+			return nil, fmt.Errorf("decoding params: %w", err)
+		}
+		return s.handleGetLogTail(p)
 	default:
 		return nil, fmt.Errorf("unknown method %q", method)
 	}

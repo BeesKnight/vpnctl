@@ -3,16 +3,8 @@ package main
 import (
 	"fmt"
 
-	"github.com/BeesKnight/vpnctl/internal/actions"
 	"github.com/BeesKnight/vpnctl/internal/vpnctlclient"
 )
-
-// requireRoot is still needed by `vpnctl run` (cmd/vpnctl/run.go), which
-// hasn't moved behind vpnctld yet (see DAEMON_MIGRATION.md) and so still
-// touches netns/iptables directly in this same process. use/down/status no
-// longer need it: vpnctld does the privileged work now, so all a client
-// needs is access to its socket.
-func requireRoot() error { return actions.RequireRoot() }
 
 func cmdUse(args []string) error {
 	if len(args) == 0 {

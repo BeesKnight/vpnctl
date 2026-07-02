@@ -40,7 +40,7 @@ type Engine interface {
 
 	// Command builds an *exec.Cmd that executes inside the isolated
 	// namespace. Stdio is left unset for the caller to wire (blocking
-	// stream, terminal takeover, or detached — see internal/run).
+	// stream, terminal takeover, or detached — see internal/vpnctld/exec.go).
 	Command(name string, args []string, opts ExecOptions) (*exec.Cmd, error)
 
 	// Recorded returns the ip/iptables commands issued so far. Always

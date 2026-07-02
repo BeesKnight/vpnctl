@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/BeesKnight/vpnctl/internal/actions"
 	"github.com/BeesKnight/vpnctl/internal/netguard"
+	"github.com/BeesKnight/vpnctl/internal/vpnctlclient"
 )
 
 type processItem struct{ p netguard.ProcessInfo }
@@ -60,7 +60,7 @@ type processesLoadedMsg struct {
 }
 
 func loadProcessesCmd() tea.Msg {
-	procs, err := actions.ListProcesses()
+	procs, err := vpnctlclient.ListProcesses()
 	return processesLoadedMsg{procs: procs, err: err}
 }
 
@@ -71,7 +71,7 @@ type processKilledMsg struct {
 
 func killSelectedProcessCmd(target string) tea.Cmd {
 	return func() tea.Msg {
-		pi, err := actions.KillProcess(target)
+		pi, err := vpnctlclient.KillProcess(target)
 		if err != nil {
 			return processKilledMsg{err: err}
 		}

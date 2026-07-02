@@ -5,7 +5,6 @@ import (
 	"os"
 
 	"github.com/BeesKnight/vpnctl/internal/rpc"
-	"github.com/BeesKnight/vpnctl/internal/run"
 	"github.com/BeesKnight/vpnctl/internal/sysuser"
 	"github.com/BeesKnight/vpnctl/internal/vpnctlclient"
 )
@@ -54,7 +53,7 @@ func cmdRun(args []string) error {
 		if err != nil {
 			return fmt.Errorf("resolving real user for privilege drop: %w", err)
 		}
-		opts.Env = run.ResolveGUIEnv(uid)
+		opts.Env = sysuser.ResolveGUIEnv(uid)
 		opts.DropUID, opts.DropGID = &uid, &gid
 	}
 

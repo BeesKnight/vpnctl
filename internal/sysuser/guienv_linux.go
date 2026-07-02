@@ -1,6 +1,6 @@
 //go:build linux
 
-package run
+package sysuser
 
 import (
 	"fmt"
@@ -33,10 +33,10 @@ var guiEnvKeys = []string{
 // shell — and borrows its environment. Falls back to the current process's
 // environment, then to conventional single-seat-desktop defaults.
 //
-// Exported: cmd/vpnctl/run.go's `vpnctl run --gui` path (vpnctlclient.Exec)
-// needs the exact same resolution when building rpc.ExecParams.Env, since
-// the daemon has no desktop session of its own to inherit anything from
-// either.
+// Exported: cmd/vpnctl/run.go's `vpnctl run --gui` path and
+// internal/tui/appsview.go's GUI-app launch path both need the exact same
+// resolution when building rpc.ExecParams.Env, since the daemon has no
+// desktop session of its own to inherit anything from either.
 func ResolveGUIEnv(uid int) []string {
 	found := scanProcEnvForUser(uid)
 

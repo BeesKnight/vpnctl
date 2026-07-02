@@ -9,8 +9,9 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/BeesKnight/vpnctl/internal/apps"
-	"github.com/BeesKnight/vpnctl/internal/netguard"
-	"github.com/BeesKnight/vpnctl/internal/run"
+	"github.com/BeesKnight/vpnctl/internal/rpc"
+	"github.com/BeesKnight/vpnctl/internal/sysuser"
+	"github.com/BeesKnight/vpnctl/internal/vpnctlclient"
 )
 
 type appItem struct{ a apps.App }
@@ -65,26 +66,34 @@ func loadAppsCmd() tea.Msg {
 	return appsLoadedMsg{apps: list, err: err}
 }
 
-// launchApp dispatches based on the app's declared type: GUI
-// apps launch detached (vpnctl keeps running, nothing to wait for); CLI/TUI
-// apps take over the real terminal via tea.ExecProcess exactly like the Run
-// screen, since both need real stdio, just with a known, pre-configured
-// command instead of a typed one.
+// launchApp dispatches based on the app's declared type: GUI apps launch
+// detached through vpnctld (vpnctl keeps running, nothing to wait for,
+// same as `vpnctl run --gui`); CLI/TUI apps take over the real terminal
+// via tea.Exec exactly like the Run screen (see execcmd.go), since both
+// need real stdio through a daemon-side PTY, just with a known,
+// pre-configured command instead of a typed one.
 func (m Model) launchApp(a apps.App) (tea.Model, tea.Cmd) {
-	ng := netguard.NewLinuxEngine(false)
-
 	if a.Type == apps.TypeGUI {
 		return m, func() tea.Msg {
-			pid, err := run.GUI(ng, a.Command)
-			return appLaunchedMsg{name: a.Name, pid: pid, err: err}
+			// sysuser.RealUIDGID/ResolveGUIEnv: same resolution
+			// cmd/vpnctl/run.go's --gui mode uses — the daemon must never
+			// run a GUI app as root.
+			uid, gid, err := sysuser.RealUIDGID()
+			if err != nil {
+				return appLaunchedMsg{name: a.Name, err: fmt.Errorf("resolving real user for privilege drop: %w", err)}
+			}
+			opts := vpnctlclient.ExecOptions{Env: sysuser.ResolveGUIEnv(uid), DropUID: &uid, DropGID: &gid}
+			result, err := vpnctlclient.Exec(rpc.ExecModeGUI, a.Command, opts)
+			return appLaunchedMsg{name: a.Name, pid: result.PID, err: err}
 		}
 	}
 
-	cmd, err := ng.Command(a.Command[0], a.Command[1:], netguard.ExecOptions{})
-	if err != nil {
-		return m, func() tea.Msg { return runFinishedMsg{cmd: a.Name, err: err} }
+	mode := rpc.ExecModeCLI
+	if a.Type == apps.TypeTUI {
+		mode = rpc.ExecModeTUI
 	}
-	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+	cmd := &daemonExecCommand{mode: mode, argv: a.Command}
+	return m, tea.Exec(cmd, func(err error) tea.Msg {
 		return runFinishedMsg{cmd: a.Name, err: err}
 	})
 }

@@ -15,8 +15,9 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/sysuser"
 )
 
-// Type is how an app must be launched — see internal/run for what each
-// means in practice (blocking+streamed, terminal-takeover, or detached).
+// Type is how an app must be launched — see internal/vpnctld/exec.go for
+// what each means in practice (blocking+streamed, terminal-takeover, or
+// detached).
 type Type string
 
 const (

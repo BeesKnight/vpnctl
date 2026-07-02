@@ -2,12 +2,9 @@ package tui
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-
-	"github.com/BeesKnight/vpnctl/internal/netguard"
 )
 
 // viewMain renders all four panels at once (Profiles/Status/Apps/Running mockup), 
@@ -105,38 +102,23 @@ func (m Model) viewStatus() string {
 	return b.String()
 }
 
+// viewLogs renders the cached m.logTail (see model.go's logTailCmd) rather
+// than reading the engine log off disk directly — vpnctld's own state dir
+// is root-only, and hitting the daemon over the socket on every render
+// would mean a blocking RPC call per frame, so this is refreshed on the
+// same 2s tick as status/processes instead.
 func (m Model) viewLogs() string {
 	var b strings.Builder
 	b.WriteString(headerStyle.Render("LOGS") + "\n")
 
-	state, err := netguard.LoadActiveState()
-	if err != nil || state == nil || state.EngineLog == "" {
-		b.WriteString(mutedStyle.Render("(no engine running)"))
+	if m.logTail == "" {
+		b.WriteString(mutedStyle.Render("(no engine running or no output yet)"))
 		return b.String()
 	}
-	lines := tailFile(state.EngineLog, 6)
-	if len(lines) == 0 {
-		b.WriteString(mutedStyle.Render("(no output yet)"))
-		return b.String()
-	}
-	b.WriteString(strings.Join(lines, "\n"))
+	b.WriteString(m.logTail)
 	return b.String()
 }
 
 func (m Model) viewBottomBar() string {
 	return helpBarStyle.Render(m.help.View(keys))
-}
-
-// tailFile returns the last n non-empty lines of path, best-effort (used
-// for the TUI's live-ish log panel — refreshed on every status tick).
-func tailFile(path string, n int) []string {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	all := strings.Split(strings.TrimRight(string(data), "\n"), "\n")
-	if len(all) > n {
-		all = all[len(all)-n:]
-	}
-	return all
 }

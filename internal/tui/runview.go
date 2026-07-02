@@ -7,13 +7,13 @@ import (
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/BeesKnight/vpnctl/internal/netguard"
+	"github.com/BeesKnight/vpnctl/internal/rpc"
 )
 
-// runScreenModel is the "Run" screen: type a command,
-// enter takes over the terminal via tea.ExecProcess and runs it inside the
-// active namespace with real stdio (streaming output, TUI programs and all —
-// this is the same mechanism calls for when launching a
+// runScreenModel is the "Run" screen: type a command, enter takes over the
+// terminal via tea.Exec (see execcmd.go's daemonExecCommand) and runs it
+// through vpnctld with a real PTY allocated server-side (streaming output,
+// TUI programs and all — this is the same mechanism used when launching a
 // TUI/interactive program from inside vpnctl's own TUI), then returns
 // control to vpnctl once the command exits.
 type runScreenModel struct {
@@ -51,23 +51,21 @@ func (m Model) updateRunScreen(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-// execRunCommand builds the command inside the active namespace and hands
-// it to tea.ExecProcess, which suspends vpnctl's own rendering, gives the
-// child direct access to the real terminal (raw mode, alt-screen — full
-// takeover, not a pty-emulated pipe), and resumes vpnctl once it exits.
+// execRunCommand hands a daemonExecCommand to tea.Exec, which suspends
+// vpnctl's own rendering, releases the real terminal to it (raw mode,
+// alt-screen — full takeover), and resumes vpnctl once it exits.
+// daemonExecCommand.Run() is what actually talks to vpnctld: the daemon
+// allocates a PTY server-side and this client proxies it, since a detached
+// daemon has no terminal of its own for the target process to inherit
+// (see internal/vpnctld/exec.go's execPTY).
 func (m Model) execRunCommand(command string) (tea.Model, tea.Cmd) {
 	argv := strings.Fields(command)
 	if len(argv) == 0 {
 		return m, nil
 	}
 
-	ng := netguard.NewLinuxEngine(false)
-	cmd, err := ng.Command(argv[0], argv[1:], netguard.ExecOptions{})
-	if err != nil {
-		return m, func() tea.Msg { return runFinishedMsg{cmd: command, err: err} }
-	}
-
-	return m, tea.ExecProcess(cmd, func(err error) tea.Msg {
+	cmd := &daemonExecCommand{mode: rpc.ExecModeTUI, argv: argv}
+	return m, tea.Exec(cmd, func(err error) tea.Msg {
 		return runFinishedMsg{cmd: command, err: err}
 	})
 }

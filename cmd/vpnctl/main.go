@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/BeesKnight/vpnctl/internal/actions"
-	"github.com/BeesKnight/vpnctl/internal/healthcheck"
 )
 
 func main() {
@@ -46,10 +44,6 @@ func main() {
 		err = cmdKill(args)
 	case "doctor":
 		err = cmdDoctor(args)
-	case actions.HealthCheckDaemonArg:
-		// Hidden: only ever invoked by internal/actions.spawnHealthCheckDaemon
-		// as a detached child of `vpnctl use`, never by a human.
-		err = healthcheck.Run(healthcheck.Interval())
 	case "-h", "--help", "help":
 		printUsage()
 		return
@@ -72,7 +66,7 @@ func printUsage() {
 	fmt.Println(`vpnctl - VPN/proxy profile launcher with kernel-level kill-switch
 
 Usage:
-  vpnctl                       launch interactive TUI (still needs sudo — see below)
+  vpnctl                       launch interactive TUI, via vpnctld — no sudo needed
   vpnctl list                  list all profiles
   vpnctl use <profile>         activate a profile, via vpnctld — no sudo needed
   vpnctl down                  deactivate the active profile, via vpnctld — no sudo needed
@@ -90,10 +84,7 @@ Usage:
   vpnctl doctor                check system dependencies and configuration
   vpnctl help                  show this message
 
-Every command above except the bare TUI talks to the vpnctld daemon (must
-be running — see DAEMON_MIGRATION.md) and needs no sudo, only access to its
-socket. Only the bare TUI (no arguments) still touches networking directly
-and needs root, until it moves behind vpnctld too: a profile activated via
-the daemon won't show up in the TUI yet, and vice versa — don't mix the
-two in the same session.`)
+Every command above, including the bare TUI, talks to the vpnctld daemon
+(must be running — see DAEMON_MIGRATION.md) and needs no sudo, only access
+to its socket.`)
 }

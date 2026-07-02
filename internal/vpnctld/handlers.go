@@ -18,12 +18,9 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/rpc"
 )
 
-// engineStartupGrace/logTailLines/tailLogFile mirror the unexported
-// internal/actions helpers of the same purpose (actions.go) — duplicated
-// rather than imported, since internal/actions stays coupled to the
-// file-backed active.json model for the TUI/`run` until they migrate too
-// (see DAEMON_MIGRATION.md); pulling vpnctld into that dependency now would
-// be backwards.
+// engineStartupGrace/logTailLines/tailLogFile: startup grace period for
+// engines with a persistent foreground process, and a small log-tail
+// helper for GetLogTail/status reporting.
 const (
 	engineStartupGrace = 300 * time.Millisecond
 	logTailLines       = 5
@@ -84,10 +81,10 @@ func (s *Server) handlePing() (*rpc.PingResult, error) {
 	return &rpc.PingResult{Version: rpc.APIVersion}, nil
 }
 
-// handleActivate mirrors internal/actions.Activate's sequencing (kill-switch
-// namespace first, then the engine inside it, then a startup grace period
-// for engines with a persistent foreground process) but keeps the result in
-// s.active instead of writing active.json, and starts the health-check as
+// handleActivate brings a profile up: kill-switch namespace first, then the
+// engine inside it, then a startup grace period for engines with a
+// persistent foreground process. Keeps the result in s.active (in-memory,
+// no active.json) and starts the health-check as
 // a cancelable goroutine instead of a detached child process.
 func (s *Server) handleActivate(p rpc.ActivateParams) (*rpc.ActivateResult, error) {
 	s.mu.Lock()
@@ -281,10 +278,9 @@ func (s *Server) killTrackedProcessesLocked() {
 }
 
 // handleListProcesses/handleKillProcess report from/act on s.processes,
-// which Exec (see exec.go) populates for run/run --tui/run --gui — the
-// TUI's own app launchers (internal/tui/appsview.go, internal/tui/runview.go)
-// aren't converted yet (see DAEMON_MIGRATION.md), so processes launched
-// from there still won't show up here.
+// which Exec (see exec.go) populates for every launch path that goes
+// through it — `vpnctl run`/`run --tui`/`run --gui` and the TUI's own app
+// launchers alike.
 func (s *Server) handleListProcesses() (*rpc.ListProcessesResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -294,9 +290,9 @@ func (s *Server) handleListProcesses() (*rpc.ListProcessesResult, error) {
 }
 
 // handleKillProcess signals the tracked process directly (the daemon is
-// always root, so unlike internal/actions.KillProcess's client-side EPERM
-// dance for a process that might be running as a different user, this can
-// just send the signal) and lets the owning Exec goroutine's own
+// always root, so no client-side EPERM dance is needed for a process that
+// might be running as a different user, this can just send the signal) and
+// lets the owning Exec goroutine's own
 // cmd.Wait()/untrackProcess reap and untrack it normally — no separate
 // bookkeeping needed here.
 func (s *Server) handleKillProcess(p rpc.KillProcessParams) (*rpc.KillProcessResult, error) {
@@ -334,4 +330,22 @@ func matchesProcessTarget(p netguard.ProcessInfo, target string) bool {
 		return true
 	}
 	return p.Name == target
+}
+
+// handleGetLogTail lets a client (the TUI's status panel) show the active
+// engine's recent log output without needing filesystem access to it —
+// vpnctld's own state dir is root-only, so it reads the file itself and
+// returns the text rather than a path.
+func (s *Server) handleGetLogTail(p rpc.GetLogTailParams) (*rpc.GetLogTailResult, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.active == nil {
+		return &rpc.GetLogTailResult{}, nil
+	}
+	n := p.Lines
+	if n <= 0 {
+		n = logTailLines
+	}
+	return &rpc.GetLogTailResult{Text: tailLogFile(s.active.handle.LogPath(), n)}, nil
 }

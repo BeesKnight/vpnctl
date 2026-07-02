@@ -1,6 +1,6 @@
 //go:build !linux
 
-package run
+package sysuser
 
 import "os"
 

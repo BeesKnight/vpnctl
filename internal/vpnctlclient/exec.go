@@ -29,7 +29,7 @@ type ExecOptions struct {
 // ExecResult is what Exec returns once the RPC completes: for cli/tui,
 // once the process has exited (ExitCode meaningful); for gui, as soon as
 // the daemon confirms it started (ExitCode always 0 — nothing is waited on,
-// same as internal/run.GUI today).
+// it's detached).
 type ExecResult struct {
 	PID      int
 	ExitCode int

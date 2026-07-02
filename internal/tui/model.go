@@ -18,9 +18,10 @@ import (
 	"github.com/charmbracelet/bubbles/list"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/BeesKnight/vpnctl/internal/actions"
 	"github.com/BeesKnight/vpnctl/internal/netguard"
 	"github.com/BeesKnight/vpnctl/internal/profile"
+	"github.com/BeesKnight/vpnctl/internal/rpc"
+	"github.com/BeesKnight/vpnctl/internal/vpnctlclient"
 )
 
 type screen int
@@ -60,6 +61,7 @@ type Model struct {
 	statusErr  error
 	activating bool
 	message    string // transient status-line message (e.g. test result, error)
+	logTail    string // cached engine log tail, refreshed on the same tick as status (see logTailCmd) — vpnctld's state dir is root-only, so this can't be read directly off disk anymore
 
 	width, height int
 	ready         bool
@@ -86,7 +88,7 @@ func New() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(loadProfilesCmd, loadAppsCmd, loadProcessesCmd, refreshStatusCmd, tickCmd())
+	return tea.Batch(loadProfilesCmd, loadAppsCmd, loadProcessesCmd, refreshStatusCmd, logTailCmd, tickCmd())
 }
 
 // ---- messages ----
@@ -108,6 +110,14 @@ type activateDoneMsg struct {
 	err     error
 }
 
+// logTailMsg carries the active engine's recent log output, fetched via
+// vpnctlclient.GetLogTail — vpnctld's own state dir is root-only, so this
+// can no longer be read directly off disk (see logTailCmd/viewLogs).
+type logTailMsg struct {
+	text string
+	err  error
+}
+
 type tickMsg time.Time
 
 func tickCmd() tea.Cmd {
@@ -120,15 +130,20 @@ func loadProfilesCmd() tea.Msg {
 }
 
 func refreshStatusCmd() tea.Msg {
-	status, healthy, err := actions.CurrentStatus()
-	return statusMsg{status: status, healthy: healthy, err: err}
+	result, err := vpnctlclient.Status()
+	return statusMsg{status: result.Status, healthy: result.Healthy, err: err}
 }
 
 func activateCmd(name string) tea.Cmd {
 	return func() tea.Msg {
-		p, status, _, err := actions.Activate(name)
-		return activateDoneMsg{profile: p, status: status, err: err}
+		p, result, err := vpnctlclient.Activate(name)
+		return activateDoneMsg{profile: p, status: result.Status, err: err}
 	}
+}
+
+func logTailCmd() tea.Msg {
+	text, err := vpnctlclient.GetLogTail(6)
+	return logTailMsg{text: text, err: err}
 }
 
 // ---- update ----
@@ -142,7 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tickMsg:
-		return m, tea.Batch(refreshStatusCmd, loadProcessesCmd, tickCmd())
+		return m, tea.Batch(refreshStatusCmd, loadProcessesCmd, logTailCmd, tickCmd())
 
 	case profilesLoadedMsg:
 		if msg.err != nil {
@@ -161,6 +176,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case logTailMsg:
+		if msg.err == nil {
+			m.logTail = msg.text
+		}
+		return m, nil
+
 	case activateDoneMsg:
 		m.activating = false
 		if msg.err != nil {
@@ -176,7 +197,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		} else if msg.result.ExitCode != 0 {
 			m.message = errorStyle.Render(fmt.Sprintf("test failed (curl exit %d) — kill-switch held", msg.result.ExitCode))
 		} else {
-			m.message = fmt.Sprintf("test ok (%s)", msg.result.Elapsed.Round(time.Millisecond))
+			// vpnctld captures curl's output and returns it whole rather than
+			// streaming it live (curl already runs -s -S, so there was no
+			// progress meter to preserve) — fold it into the single-line
+			// message (Fields+Join collapses curl's multi-line "-w" output
+			// into one line, since m.message only ever renders as one).
+			output := strings.Join(strings.Fields(msg.result.Output), " ")
+			m.message = fmt.Sprintf("test ok (%s): %s", time.Duration(msg.result.ElapsedMS)*time.Millisecond, output)
 		}
 		return m, nil
 
@@ -343,7 +370,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.handleEnter()
 
 	case key.Matches(msg, keys.Deactivate):
-		if err := actions.Deactivate(); err != nil {
+		if err := vpnctlclient.Deactivate(); err != nil {
 			m.message = errorStyle.Render("down: " + err.Error())
 		} else {
 			m.message = "profile deactivated"
@@ -453,13 +480,13 @@ func (m *Model) moveFocusedList(down bool) tea.Cmd {
 }
 
 type testDoneMsg struct {
-	result actions.TestResult
+	result rpc.TestConnectivityResult
 	err    error
 }
 
 func testCmd() tea.Cmd {
 	return func() tea.Msg {
-		res, err := actions.TestConnectivity()
+		res, err := vpnctlclient.TestConnectivity()
 		return testDoneMsg{result: res, err: err}
 	}
 }

@@ -12,6 +12,7 @@ const (
 	MethodTestConnectivity = "TestConnectivity"
 	MethodListProcesses    = "ListProcesses"
 	MethodKillProcess      = "KillProcess"
+	MethodGetLogTail       = "GetLogTail"
 )
 
 // PingResult reports the daemon's own version, for a client that wants to
@@ -60,10 +61,8 @@ type TestConnectivityResult struct {
 	Output    string `json:"output"`
 }
 
-// ListProcessesResult is empty until `vpnctl run`/the TUI's process
-// launchers move behind the daemon (see DAEMON_MIGRATION.md) — process
-// tracking has nowhere to be populated from yet, so this always reports no
-// processes for now, which is accurate, not a stub bug.
+// ListProcessesResult lists everything currently tracked as launched
+// through the active profile (see internal/vpnctld/exec.go).
 type ListProcessesResult struct {
 	Processes []netguard.ProcessInfo `json:"processes"`
 }
@@ -76,4 +75,17 @@ type KillProcessParams struct {
 
 type KillProcessResult struct {
 	Process netguard.ProcessInfo `json:"process"`
+}
+
+// GetLogTailParams/Result let a client (the TUI's status panel) show the
+// active engine's recent log output without needing filesystem access to
+// it — vpnctld's own state dir is root-only (see DAEMON_MIGRATION.md's
+// note on VPNCTL_STATE_HOME), so the daemon reads and returns the text
+// itself rather than handing back a path.
+type GetLogTailParams struct {
+	Lines int `json:"lines"`
+}
+
+type GetLogTailResult struct {
+	Text string `json:"text"`
 }

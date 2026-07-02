@@ -20,8 +20,7 @@ import (
 
 // terminateGrace is how long a killed process gets to exit after SIGTERM
 // before Exec escalates to SIGKILL — same graceful-then-forceful pattern
-// as internal/netguard's killTrackedProcesses and internal/actions'
-// terminate.
+// as internal/netguard's killTrackedProcesses.
 const terminateGrace = 3 * time.Second
 
 // handleExecConn services one MethodExec request end to end: builds the
@@ -103,14 +102,11 @@ func (s *Server) untrackProcess(pid int) {
 }
 
 // execGUI launches cmd detached (stdio to /dev/null) and replies with its
-// PID as soon as it starts — there is nothing to stream. Unlike
-// internal/run.GUI (which never reaps or untracks, since the CLI process
-// that launched it exits immediately and nothing is left to do either),
-// the daemon is long-lived and can actually wait on it: reaping it here so
-// it doesn't become a zombie under vpnctld also lets `vpnctl ps` correctly
-// stop showing it once it exits, instead of showing a permanently stale
-// entry — a real improvement the daemon model enables, not a behavior
-// change worth preserving from the old one.
+// PID as soon as it starts — there is nothing to stream. Because the daemon
+// is long-lived, unlike the short-lived CLI process that requested this, it
+// can actually wait on the child: reaping it here so it doesn't become a
+// zombie under vpnctld also lets `vpnctl ps` correctly stop showing it once
+// it exits, instead of showing a permanently stale entry.
 func (s *Server) execGUI(conn net.Conn, req rpc.Request, cmd *exec.Cmd, argv []string) {
 	cmd.Stdin = nil
 	devnull, err := os.OpenFile(os.DevNull, os.O_RDWR, 0)
