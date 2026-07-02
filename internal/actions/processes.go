@@ -1,6 +1,7 @@
 package actions
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -63,20 +64,46 @@ func findProcess(procs []netguard.ProcessInfo, target string) *netguard.ProcessI
 	return nil
 }
 
+// stillAlive probes pid with signal 0 (sends no actual signal, just checks
+// deliverability). Critically, this distinguishes "the process is gone"
+// (ESRCH) from "the process exists but this caller can't signal it" (EPERM,
+// e.g. a `vpnctl run --` CLI process still running as root while `vpnctl
+// kill` itself runs unprivileged, which cmdKill unlike cmdRun doesn't
+// require — see internal/run.CLI, which never drops privileges the way
+// GUI() does). Treating EPERM as "already gone" would make KillProcess
+// silently report success and drop the process from active.json's tracking
+// without ever having signaled it — orphaning it exactly like the teardown
+// bugs this tool otherwise guards against.
+func stillAlive(proc *os.Process) bool {
+	err := proc.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
+}
+
 func terminate(pid int) error {
 	proc, err := os.FindProcess(pid)
 	if err != nil {
 		return nil
 	}
-	if proc.Signal(syscall.Signal(0)) != nil {
+	if !stillAlive(proc) {
 		return nil // already gone
 	}
-	_ = proc.Signal(syscall.SIGTERM)
+	if err := proc.Signal(syscall.SIGTERM); err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			return fmt.Errorf("no permission to signal pid %d (it may still be running as root — try again with sudo)", pid)
+		}
+		return nil // ESRCH etc: gone by the time we got here
+	}
 	for i := 0; i < 30; i++ {
-		if proc.Signal(syscall.Signal(0)) != nil {
+		if !stillAlive(proc) {
 			return nil
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
-	return proc.Signal(syscall.SIGKILL)
+	if err := proc.Signal(syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.EPERM) {
+			return fmt.Errorf("no permission to signal pid %d (it may still be running as root — try again with sudo)", pid)
+		}
+		return nil
+	}
+	return nil
 }
