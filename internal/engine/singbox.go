@@ -87,7 +87,6 @@ func writeSingBoxConfig(p profile.Profile, resolvedIP string, port int) (string,
 					routeExcludeAddress(resolvedIP),
 				},
 				"stack": "system",
-				"sniff": true,
 			},
 		},
 		"outbounds": []map[string]any{
@@ -95,7 +94,12 @@ func writeSingBoxConfig(p profile.Profile, resolvedIP string, port int) (string,
 			{"type": "direct", "tag": "direct-out"},
 		},
 		"route": map[string]any{
+			// Per-inbound "sniff": true was removed in sing-box 1.13 (legacy
+			// inbound fields); sniffing is now its own route rule action,
+			// which must run before the hijack-dns rule so DNS traffic is
+			// still recognized as such.
 			"rules": []map[string]any{
+				{"action": "sniff"},
 				{"protocol": "dns", "action": "hijack-dns"},
 			},
 			"final":                 "proxy-out",

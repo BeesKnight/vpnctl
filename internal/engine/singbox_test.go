@@ -107,4 +107,20 @@ func TestWriteSingBoxConfigPreservesOutboundFieldsAndOverridesServer(t *testing.
 	if route["auto_detect_interface"] != false {
 		t.Errorf("expected auto_detect_interface=false, got %v", route["auto_detect_interface"])
 	}
+
+	if _, present := tunIn["sniff"]; present {
+		t.Errorf("expected no per-inbound %q field — sing-box 1.13 rejects it as a removed legacy field (see route rule action instead), got %v", "sniff", tunIn["sniff"])
+	}
+	rules, ok := route["rules"].([]any)
+	if !ok || len(rules) < 2 {
+		t.Fatalf("expected at least a sniff rule and a hijack-dns rule, got %v", route["rules"])
+	}
+	sniffRule, ok := rules[0].(map[string]any)
+	if !ok || sniffRule["action"] != "sniff" {
+		t.Errorf("expected the first route rule to be the sniff action (sing-box 1.13's replacement for per-inbound \"sniff\"), got %v", rules[0])
+	}
+	dnsRule, ok := rules[1].(map[string]any)
+	if !ok || dnsRule["action"] != "hijack-dns" {
+		t.Errorf("expected the hijack-dns rule to still run after sniffing, got %v", rules[1])
+	}
 }
