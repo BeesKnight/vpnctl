@@ -1,0 +1,32 @@
+[Unit]
+Description=vpnctld — privileged daemon for vpnctl (netns/iptables kill-switch + tunnel engine)
+Documentation=https://github.com/BeesKnight/vpnctl
+After=network.target
+
+[Service]
+Type=notify
+ExecStart=/usr/local/bin/vpnctld
+Restart=on-failure
+RestartSec=2
+
+# vpnctld pings this on a timer (~half the interval, systemd's own
+# convention) with a real self Ping RPC round trip, not just "a goroutine
+# ran" — see cmd/vpnctld/main.go's runWatchdog. Catches a genuine deadlock
+# (e.g. on Server.mu) that Restart=on-failure alone can't: the process
+# would otherwise stay alive but wedged, with a healthy-looking PID and no
+# way for a client to tell the difference from "daemon is just busy".
+WatchdogSec=30
+
+# Critical, do not change without re-verifying teardown-on-stop on a real
+# stand: the default KillMode=control-group makes `systemctl stop` send
+# SIGTERM to the whole service cgroup, including the child process vpnctld
+# spawns mid-shutdown for graceful teardown (awg-quick down via nsenter,
+# inside Shutdown()->deactivateLocked()->handle.Stop()). That child gets
+# killed mid-flight, Stop() returns a nonzero exit, and Teardown() (netns
+# removal) is never reached — the namespace is left dangling exactly like
+# an unclean kill in the old file-based model. KillMode=process only signals
+# vpnctld's own PID, letting its graceful-teardown child run to completion.
+KillMode=process
+
+[Install]
+WantedBy=multi-user.target

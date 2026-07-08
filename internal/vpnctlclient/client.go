@@ -94,7 +94,7 @@ func Activate(name string) (profile.Profile, rpc.ActivateResult, error) {
 		return profile.Profile{}, rpc.ActivateResult{}, err
 	}
 
-	params := rpc.ActivateParams{Name: p.Name, Kind: string(p.Kind), Family: string(p.Family)}
+	params := rpc.ActivateParams{Name: p.Name, Kind: string(p.Kind), Family: string(p.Family), Backup: p.Backup}
 	switch p.Family {
 	case profile.FamilyWG:
 		if p.WG == nil {

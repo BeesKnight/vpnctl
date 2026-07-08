@@ -48,13 +48,33 @@ type Engine interface {
 	Recorded() []string
 }
 
-// protocolFor returns the transport protocol netguard must point-permit for
-// this profile's kind: WireGuard/AmneziaWG and Hysteria2 both tunnel over
-// UDP (Hysteria2 is QUIC-based); VLESS runs over TCP.
-func protocolFor(k profile.Kind) string {
-	switch k {
+// protocolForProfile returns the transport protocol netguard must
+// point-permit for this profile: WireGuard/AmneziaWG and Hysteria2 both
+// tunnel over UDP (Hysteria2 is QUIC-based).
+//
+// VLESS is TCP for every transport except mKCP and QUIC, which are UDP at
+// the wire level, not a TCP tunnel carrying UDP-shaped payloads — Kind
+// alone (profile.KindVLESS) can't tell them apart, since it's the same
+// Kind regardless of which of the six-odd VLESS transports (tcp/ws/grpc/
+// xhttp/http/kcp) a given profile actually uses; the transport is only
+// visible in p.Outbound["transport"]["type"]. Getting this wrong isn't
+// cosmetic: the kill-switch's point-to-point ACCEPT rule is written for
+// exactly one protocol, so a VLESS+kcp profile activated with the old
+// Kind-only "VLESS is always tcp" assumption had its own real UDP traffic
+// silently dropped by its own kill-switch — connects to nothing, with no
+// error beyond a generic timeout, since the fail-closed design means a
+// blocked packet looks identical to an unreachable server.
+func protocolForProfile(p profile.Profile) string {
+	switch p.Kind {
 	case profile.KindWireGuard, profile.KindAmneziaWG, profile.KindHysteria2:
 		return "udp"
+	case profile.KindVLESS:
+		if transport, ok := p.Outbound["transport"].(map[string]any); ok {
+			if t, _ := transport["type"].(string); t == "kcp" || t == "quic" {
+				return "udp"
+			}
+		}
+		return "tcp"
 	default:
 		return "tcp"
 	}

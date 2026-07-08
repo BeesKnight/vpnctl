@@ -86,7 +86,25 @@ func writeSingBoxConfig(p profile.Profile, resolvedIP string, port int) (string,
 				"route_exclude_address": []string{
 					routeExcludeAddress(resolvedIP),
 				},
-				"stack": "system",
+				// "system" stack relies on the OS itself completing the TCP
+				// handshake and redirecting the resulting socket to sing-box
+				// via NAT/TPROXY rules that sing-box's own auto_route is
+				// supposed to install — inside vpnctl's namespace this
+				// silently never happens (confirmed live: tcpdump shows the
+				// SYN actually reaching the tun device and being accepted by
+				// the kill-switch, but sing-box's own log never registers an
+				// inbound connection for it, and no PREROUTING/TPROXY rule
+				// ever appears in `nft list ruleset` — so it just retransmits
+				// SYNs into a void until the client times out). UDP happened
+				// to work regardless (DNS resolved fine), which is what made
+				// this look like a routing problem at first rather than a
+				// stack problem specifically. "gvisor" is a full userspace
+				// TCP/IP stack that terminates connections directly from the
+				// raw packets sing-box reads off the tun fd — no OS-level
+				// redirection needed, and confirmed working end-to-end
+				// (real HTTP response through a live Hysteria2 tunnel) on
+				// the same setup that "system" silently failed on.
+				"stack": "gvisor",
 			},
 		},
 		"outbounds": []map[string]any{

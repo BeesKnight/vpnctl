@@ -3,6 +3,8 @@ package importer
 import (
 	"encoding/base64"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,6 +18,31 @@ func withTempHome(t *testing.T) {
 	dir := t.TempDir()
 	t.Setenv("HOME", dir)
 	t.Setenv("SUDO_USER", "")
+}
+
+// TestImportSubscriptionRejectsOversizedResponse locks in the
+// maxSubscriptionBytes cap: a subscription URL points at a server vpnctl
+// doesn't control, and without a bound a malicious/compromised one
+// returning gigabytes with no Content-Length would have io.ReadAll grow an
+// unbounded buffer and OOM the caller.
+func TestImportSubscriptionRejectsOversizedResponse(t *testing.T) {
+	withTempHome(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Length", "") // force chunked/no advance size hint, matching a hostile server
+		chunk := make([]byte, 64*1024)
+		for i := 0; i < 80; i++ { // 80 * 64KiB = 5 MiB, over the 4 MiB cap
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	if _, err := ImportSubscription(srv.URL); err == nil {
+		t.Fatal("expected an error for an oversized subscription response")
+	} else if !strings.Contains(err.Error(), "too large") {
+		t.Errorf("expected a 'too large' error, got: %v", err)
+	}
 }
 
 func TestParseSubscriptionDecodesBase64AndSplitsLines(t *testing.T) {

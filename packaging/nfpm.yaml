@@ -2,14 +2,15 @@
 #
 # Build with:
 #   go build -o packaging/vpnctl ./cmd/vpnctl
-#   nfpm package --config packaging/nfpm.yaml --target vpnctl_1.0.4_amd64.deb --packager deb
+#   go build -o packaging/vpnctld ./cmd/vpnctld
+#   nfpm package --config packaging/nfpm.yaml --target vpnctl_1.2.0_amd64.deb --packager deb
 #
 # Bump `version:` below for each release (this nfpm version has no
 # --version/--arch package-command override, so it has to live here).
 name: vpnctl
 arch: amd64
 platform: linux
-version: 1.0.4
+version: 1.2.0
 maintainer: "vpnctl maintainers <shterenfeld151@gmail.com>"
 homepage: https://github.com/BeesKnight/vpnctl
 license: MIT
@@ -19,7 +20,9 @@ description: |
   Interactive TUI/CLI for switching between WireGuard/AmneziaWG and
   VLESS/Hysteria2 VPN/proxy profiles with a kernel-level (netns + iptables)
   kill-switch, and a launcher for running GUI/CLI/TUI programs through
-  whichever profile is active.
+  whichever profile is active. Network/kill-switch state is owned by the
+  privileged vpnctld system service; vpnctl itself is an unprivileged
+  client, see DAEMON_MIGRATION.md.
 
 # These are ordinary Debian/Kali packages, so apt can resolve them before
 # postinst runs. postinst must not call apt-get because dpkg/apt already holds
@@ -36,14 +39,43 @@ depends:
   - golang-go
   - make
   - gcc
+  - systemd
+
+# Soft dependency, not depends: — notify-send (libnotify-bin) only powers
+# the health-check-transition desktop notification (internal/vpnctld/notify.go),
+# which is entirely best-effort and silently no-ops without it. Forcing it
+# as a hard dependency would drag a GUI-notification package onto headless
+# servers that will never have a desktop session to notify anyway.
+suggests:
+  - libnotify-bin
 
 contents:
   - src: ./vpnctl
     dst: /usr/local/bin/vpnctl
     file_info:
       mode: 0755
+  - src: ./vpnctld
+    dst: /usr/local/bin/vpnctld
+    file_info:
+      mode: 0755
+  - src: ./vpnctld.service
+    dst: /lib/systemd/system/vpnctld.service
+    file_info:
+      mode: 0644
   - src: ../README.md
     dst: /usr/share/doc/vpnctl/README.md
+    file_info:
+      mode: 0644
+  - src: ./completions/vpnctl.bash
+    dst: /usr/share/bash-completion/completions/vpnctl
+    file_info:
+      mode: 0644
+  - src: ./completions/vpnctl.zsh
+    dst: /usr/share/zsh/vendor-completions/_vpnctl
+    file_info:
+      mode: 0644
+  - src: ./completions/vpnctl.fish
+    dst: /usr/share/fish/vendor_completions.d/vpnctl.fish
     file_info:
       mode: 0644
 

@@ -1,8 +1,6 @@
 package engine
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
@@ -59,23 +57,22 @@ func TestRewriteEndpointErrorsWithoutPeerSection(t *testing.T) {
 	}
 }
 
-func TestAWGQuickBinaryDoesNotUseWGQuickForAmneziaWG(t *testing.T) {
-	dir := t.TempDir()
-	wgQuick := filepath.Join(dir, "wg-quick")
-	if err := os.WriteFile(wgQuick, []byte("#!/bin/sh\n"), 0o755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", dir)
+// TestAWGQuickBinaryNamePicksByKindAlone locks in the fix for a real CI
+// failure: this used to also probe the host directly (exec.LookPath) to
+// decide which binary was actually installed, which meant every test
+// activating a WireGuard-family profile — even ones using a fake
+// netguard.Engine specifically to avoid touching the real host — failed on
+// any machine without a real wg-quick/awg-quick on PATH (confirmed live: a
+// GitHub Actions runner with neither installed). The choice is now made
+// purely from the profile's own kind, with no host dependency at all —
+// verified here by deliberately NOT putting anything on PATH.
+func TestAWGQuickBinaryNamePicksByKindAlone(t *testing.T) {
+	t.Setenv("PATH", t.TempDir()) // deliberately empty — must not matter
 
-	got, err := awgQuickBinary(profile.KindWireGuard)
-	if err != nil {
-		t.Fatalf("plain WireGuard should fall back to wg-quick: %v", err)
+	if got := awgQuickBinaryName(profile.KindWireGuard); got != "wg-quick" {
+		t.Errorf("expected wg-quick for KindWireGuard, got %q", got)
 	}
-	if got != "wg-quick" {
-		t.Fatalf("expected wg-quick fallback, got %q", got)
-	}
-
-	if _, err := awgQuickBinary(profile.KindAmneziaWG); err == nil {
-		t.Fatal("expected AmneziaWG to require awg-quick instead of falling back to wg-quick")
+	if got := awgQuickBinaryName(profile.KindAmneziaWG); got != "awg-quick" {
+		t.Errorf("expected awg-quick for KindAmneziaWG, got %q", got)
 	}
 }

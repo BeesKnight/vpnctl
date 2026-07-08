@@ -48,6 +48,7 @@ func profileFromParams(p rpc.ActivateParams) (profile.Profile, error) {
 		Name:   p.Name,
 		Kind:   profile.Kind(p.Kind),
 		Family: profile.Family(p.Family),
+		Backup: p.Backup,
 	}
 
 	switch prof.Family {
@@ -86,9 +87,11 @@ func (s *Server) handlePing() (*rpc.PingResult, error) {
 // persistent foreground process. Keeps the result in s.active (in-memory,
 // no active.json) and starts the health-check as
 // a cancelable goroutine instead of a detached child process.
-func (s *Server) handleActivate(p rpc.ActivateParams) (*rpc.ActivateResult, error) {
+func (s *Server) handleActivate(p rpc.ActivateParams, peer peerIdentity) (*rpc.ActivateResult, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.logger.Printf("audit: uid=%d activate profile=%q", peer.UID, p.Name)
 
 	if s.active != nil {
 		return nil, fmt.Errorf("profile %q is already active — deactivate it first", s.active.profile.Name)
@@ -126,12 +129,14 @@ func (s *Server) handleActivate(p rpc.ActivateParams) (*rpc.ActivateResult, erro
 
 	hctx, cancel := context.WithCancel(context.Background())
 	s.active = &activeState{
-		profile:    prof,
-		status:     status,
-		handle:     handle,
-		healthStop: cancel,
+		profile:        prof,
+		status:         status,
+		handle:         handle,
+		healthStop:     cancel,
+		activatedByUID: peer.UID,
+		activatedByGID: peer.GID,
 	}
-	go s.healthCheckLoop(hctx, prof)
+	go s.healthCheckLoop(hctx, prof, peer.UID, peer.GID)
 
 	return &rpc.ActivateResult{
 		Status:     status,
@@ -140,9 +145,14 @@ func (s *Server) handleActivate(p rpc.ActivateParams) (*rpc.ActivateResult, erro
 	}, nil
 }
 
-func (s *Server) handleDeactivate() (*struct{}, error) {
+func (s *Server) handleDeactivate(peer peerIdentity) (*struct{}, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	name := "none"
+	if s.active != nil {
+		name = s.active.profile.Name
+	}
+	s.logger.Printf("audit: uid=%d deactivate profile=%q", peer.UID, name)
 	return &struct{}{}, s.deactivateLocked()
 }
 
@@ -213,16 +223,28 @@ func (s *Server) handleStatus() (*rpc.StatusResult, error) {
 // than streaming — curl already runs -s -S (silent, errors only), so
 // there's no live progress meter to preserve by keeping the connection
 // open the whole time.
+//
+// Deliberately does NOT hold s.mu across cmd.Run(): curl's own --max-time
+// bounds it to 10s, but every other RPC (Status/Ping/ListProcesses/...)
+// shares the same mutex, so holding it for the whole call used to stall
+// every other connected client's request for up to that long — on a
+// shared-machine daemon with several clients, one `vpnctl test` shouldn't
+// be able to freeze everyone else's `vpnctl status`. The lock is only held
+// long enough to read s.active/s.ng consistently; if a concurrent
+// Deactivate tears the namespace down mid-curl, the command simply errors
+// out like any other network failure — an acceptable trade for not
+// serializing unrelated read-only calls behind this one.
 func (s *Server) handleTestConnectivity() (*rpc.TestConnectivityResult, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	if s.active == nil {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("no active profile — activate one first")
 	}
+	ng := s.ng
+	s.mu.Unlock()
 
 	curlArgs := []string{"-s", "-S", "--max-time", "10", "-w", "\nhttp_status=%{http_code} time=%{time_total}s\n", "https://ifconfig.me/ip"}
-	cmd, err := s.ng.Command("curl", curlArgs, netguard.ExecOptions{})
+	cmd, err := ng.Command("curl", curlArgs, netguard.ExecOptions{})
 	if err != nil {
 		return nil, err
 	}
@@ -295,7 +317,7 @@ func (s *Server) handleListProcesses() (*rpc.ListProcessesResult, error) {
 // lets the owning Exec goroutine's own
 // cmd.Wait()/untrackProcess reap and untrack it normally — no separate
 // bookkeeping needed here.
-func (s *Server) handleKillProcess(p rpc.KillProcessParams) (*rpc.KillProcessResult, error) {
+func (s *Server) handleKillProcess(p rpc.KillProcessParams, peer peerIdentity) (*rpc.KillProcessResult, error) {
 	s.mu.Lock()
 	var found *netguard.ProcessInfo
 	for i := range s.processes {
@@ -310,6 +332,8 @@ func (s *Server) handleKillProcess(p rpc.KillProcessParams) (*rpc.KillProcessRes
 	if found == nil {
 		return nil, fmt.Errorf("no tracked process matches %q", p.Target)
 	}
+
+	s.logger.Printf("audit: uid=%d kill target=%q pid=%d name=%q", peer.UID, p.Target, found.PID, found.Name)
 
 	proc, err := os.FindProcess(found.PID)
 	if err != nil {

@@ -5,14 +5,17 @@
 # dependencies it installed itself (never ones that were already present —
 # see postinst's installed_by_vpnctl.json).
 #
-# By the time this runs, prerm has already called `vpnctl down` for every
-# user with an active profile, which tears down the namespace/iptables and
-# restores sysctl from its own backup — so there is nothing network-related
-# left to clean up here, only files.
+# By the time this runs, prerm has already stopped vpnctld (which tears
+# down the namespace/iptables and restores sysctl from its own backup via
+# its own Shutdown()), or run the force_teardown fallback if the daemon
+# didn't respond — so there is nothing network-related left to clean up
+# here, only files.
 set -u
 
 STATE_DIR="/var/lib/vpnctl"
+DAEMON_STATE_DIR="/var/lib/vpnctld"
 DEPS_FILE="$STATE_DIR/installed_by_vpnctl.json"
+UNIT_FILE="/lib/systemd/system/vpnctld.service"
 
 remove_state_dirs() {
   [ -d /root/.local/state/vpnctl ] && rm -rf /root/.local/state/vpnctl
@@ -71,6 +74,16 @@ remove_installed_deps() {
   fi
 }
 
+# remove_daemon_unit is a defensive cleanup in case nfpm/dpkg didn't already
+# remove the unit file it owns (e.g. a leftover from a manual install done
+# before this file was tracked in nfpm.yaml's contents:). daemon-reload
+# clears systemd's cached view of it either way; harmless if there was
+# nothing to reload.
+remove_daemon_unit() {
+  rm -f "$UNIT_FILE"
+  command -v systemctl >/dev/null 2>&1 && systemctl daemon-reload 2>/dev/null || true
+}
+
 case "${1:-}" in
   remove)
     # Ephemeral runtime state is always cleared; user profiles are not
@@ -81,7 +94,13 @@ case "${1:-}" in
     remove_state_dirs
     remove_config_dirs
     remove_installed_deps
+    remove_daemon_unit
     rm -rf "$STATE_DIR"
+    rm -rf "$DAEMON_STATE_DIR"
+    # The 'vpnctl' group is left in place even on purge: deleting a group
+    # that's still referenced as another user's supplementary group (or
+    # just recently used) is more likely to surprise someone than a stray,
+    # harmless group left behind — not worth the risk for a purge script.
     ;;
   *)
     # upgrade/failed-upgrade/etc: nothing to do

@@ -36,6 +36,8 @@ func main() {
 		err = cmdRun(args)
 	case "import":
 		err = cmdImport(args)
+	case "export":
+		err = cmdExport(args)
 	case "insecure":
 		err = cmdInsecure(args)
 	case "ps":
@@ -44,6 +46,16 @@ func main() {
 		err = cmdKill(args)
 	case "doctor":
 		err = cmdDoctor(args)
+	case "bench":
+		err = cmdBench(args)
+	case "logs":
+		err = cmdLogs(args)
+	case "__complete_profiles":
+		// Hidden helper for the shell completion scripts (packaging/completions/)
+		// — not listed in printUsage. Prints one profile name per line, plain,
+		// so bash/zsh/fish completion functions can just read lines rather
+		// than parsing `vpnctl list`'s grouped/padded table output.
+		err = cmdCompleteProfiles(args)
 	case "-h", "--help", "help":
 		printUsage()
 		return
@@ -79,9 +91,15 @@ Usage:
   vpnctl kill <pid|name>       kill a process launched through the active profile, via vpnctld
   vpnctl import --sub <url>    import profiles from a subscription link
   vpnctl import --wg <path>    import a WireGuard/AmneziaWG .conf file
+  vpnctl export <profile>      print a profile's underlying config file (WG: re-importable .conf; proxy: internal sing-box JSON, not a subscription link)
+  vpnctl export <profile> --out <path>  write it to a file instead of stdout
   vpnctl insecure <profile>    disable TLS certificate verification for one VLESS/Hysteria2 profile
   vpnctl insecure <profile> off  re-enable TLS certificate verification for it
   vpnctl doctor                check system dependencies and configuration
+  vpnctl doctor --fix          also attempt to auto-repair what's safely fixable (start vpnctld, remove a stale WireGuard socket)
+  vpnctl bench                 activate each profile in turn, test connectivity, report a latency-ranked table
+  vpnctl logs                  show the active engine's recent log output
+  vpnctl logs -f               follow the active engine's log output (like tail -f)
   vpnctl help                  show this message
 
 Every command above, including the bare TUI, talks to the vpnctld daemon

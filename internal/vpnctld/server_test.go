@@ -103,6 +103,14 @@ func startTestServer(t *testing.T) string {
 		_ = srv.Serve(ctx, ln)
 	}()
 	t.Cleanup(func() {
+		// Shutdown deactivates whatever's still active first — without
+		// this, a test that leaves a profile active (or that Activates
+		// more than one over its lifetime, e.g. an auto-failover test)
+		// leaks that profile's healthCheckLoop goroutine/ticker past the
+		// end of the test, running until the whole test binary exits and
+		// occasionally interleaving its log lines into a *later* test's
+		// output.
+		srv.Shutdown()
 		cancel()
 		<-done
 	})

@@ -30,3 +30,21 @@ func cmdList(args []string) error {
 	}
 	return nil
 }
+
+// cmdCompleteProfiles prints one profile name per line with no decoration
+// — see main.go's "__complete_profiles" case. Deliberately never returns
+// an error to the shell: a completion function invoking this mid-keystroke
+// shouldn't ever print a Go error to the terminal, just offer no matches.
+func cmdCompleteProfiles(_ []string) error {
+	if err := profile.EnsureDirs(); err != nil {
+		return nil
+	}
+	profiles, err := profile.LoadAll()
+	if err != nil {
+		return nil
+	}
+	for _, p := range profiles {
+		fmt.Println(p.Name)
+	}
+	return nil
+}

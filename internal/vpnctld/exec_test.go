@@ -4,8 +4,10 @@ import (
 	"bytes"
 	"encoding/json"
 	"net"
+	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -23,7 +25,12 @@ import (
 // enough (cmd.Args[0] there is always "nsenter", never the requested
 // binary) to catch code that reads cmd.Args instead of the originally
 // requested argv for things like ProcessInfo.Name.
-type realCommandEngine struct{ active bool }
+type realCommandEngine struct {
+	active bool
+
+	mu       sync.Mutex
+	lastOpts netguard.ExecOptions // captured by Command, for asserting on privilege-drop behavior
+}
 
 func (e *realCommandEngine) Setup(p profile.Profile) (netguard.Status, error) {
 	e.active = true
@@ -37,12 +44,21 @@ func (e *realCommandEngine) UpdateEndpoint(profile.Profile) (bool, string, error
 	return false, "", nil
 }
 func (e *realCommandEngine) Command(name string, args []string, opts netguard.ExecOptions) (*exec.Cmd, error) {
+	e.mu.Lock()
+	e.lastOpts = opts
+	e.mu.Unlock()
 	full := append([]string{name}, args...)
 	quoted := make([]string, len(full))
 	for i, a := range full {
 		quoted[i] = "'" + strings.ReplaceAll(a, "'", `'\''`) + "'"
 	}
 	return exec.Command("sh", "-c", strings.Join(quoted, " ")), nil
+}
+
+func (e *realCommandEngine) LastOpts() netguard.ExecOptions {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.lastOpts
 }
 func (e *realCommandEngine) Recorded() []string { return nil }
 
@@ -179,7 +195,7 @@ func TestExecKillProcessTerminatesTrackedProcess(t *testing.T) {
 		t.Fatalf("unmarshaling: %v", err)
 	}
 
-	killResult, err := srv.handleKillProcess(rpc.KillProcessParams{Target: "sleep"})
+	killResult, err := srv.handleKillProcess(rpc.KillProcessParams{Target: "sleep"}, peerIdentity{})
 	if err != nil {
 		t.Fatalf("handleKillProcess: %v", err)
 	}
@@ -343,5 +359,91 @@ func TestListProcessesReflectsRunningExec(t *testing.T) {
 	}
 	if len(result.Processes) != 1 || result.Processes[0].Name != "sleep" {
 		t.Errorf("expected one tracked 'sleep' process, got %+v", result.Processes)
+	}
+}
+
+// TestExecDropTarget locks in the privilege-escalation fix: a non-root
+// peer's own claimed DropUID/GID must never be trusted, only its real
+// SO_PEERCRED identity; a root peer's own request is honored as-is.
+func TestExecDropTarget(t *testing.T) {
+	claimedUID, claimedGID := 0, 0 // a hostile non-root client claiming "drop to root", i.e. don't drop at all
+
+	uid, gid := execDropTarget(peerIdentity{UID: 1000, GID: 1000}, &claimedUID, &claimedGID)
+	if uid == nil || *uid != 1000 || gid == nil || *gid != 1000 {
+		t.Errorf("non-root peer: expected forced drop to 1000:1000 regardless of claimed uid, got uid=%v gid=%v", uid, gid)
+	}
+
+	uid, gid = execDropTarget(peerIdentity{UID: 1000, GID: 1000}, nil, nil)
+	if uid == nil || *uid != 1000 || gid == nil || *gid != 1000 {
+		t.Errorf("non-root peer with no claim at all: expected forced drop to 1000:1000, got uid=%v gid=%v", uid, gid)
+	}
+
+	wantUID, wantGID := 1001, 1001
+	uid, gid = execDropTarget(peerIdentity{UID: 0, GID: 0}, &wantUID, &wantGID)
+	if uid != &wantUID || gid != &wantGID {
+		t.Errorf("root peer: expected its own claimed drop target honored as-is, got uid=%v gid=%v", uid, gid)
+	}
+
+	uid, gid = execDropTarget(peerIdentity{UID: 0, GID: 0}, nil, nil)
+	if uid != nil || gid != nil {
+		t.Errorf("root peer with no drop requested: expected nil/nil (stays root), got uid=%v gid=%v", uid, gid)
+	}
+}
+
+// TestExecRefusesClientClaimedRootDrop is the end-to-end version of
+// TestExecDropTarget: a client dials as the real (non-root) test-runner
+// uid — the daemon sees that via SO_PEERCRED regardless of what the
+// request claims — and asks to run as uid/gid 0. The command must still
+// actually be dispatched with a drop to the test process's own uid.
+func TestExecRefusesClientClaimedRootDrop(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("this test's whole premise is a non-root peer; running as root defeats it")
+	}
+	sock, srv := startExecTestServer(t)
+	ng := srv.ng.(*realCommandEngine)
+
+	spoofedUID, spoofedGID := 0, 0
+	conn, resp := dialExec(t, sock, rpc.ExecParams{
+		Mode: rpc.ExecModeCLI, Argv: []string{"echo", "hi"},
+		DropUID: &spoofedUID, DropGID: &spoofedGID,
+	})
+	defer conn.Close()
+	if resp.Error != "" {
+		t.Fatalf("Exec: %s", resp.Error)
+	}
+	for {
+		ft, _, err := rpc.ReadFrame(conn)
+		if err != nil || ft == rpc.FrameExit {
+			break
+		}
+	}
+
+	opts := ng.LastOpts()
+	realUID := os.Geteuid()
+	if opts.DropToUID == nil || *opts.DropToUID != realUID {
+		t.Errorf("expected DropToUID forced to the real peer uid %d despite client claiming 0, got %v", realUID, opts.DropToUID)
+	}
+}
+
+// TestExecRefusesOverMaxTrackedProcesses locks in the maxTrackedProcesses
+// cap: without it, ordinary "vpnctl" group membership (not root) is enough
+// to spam-launch processes until the host's process table/fd limits are
+// exhausted (see maxTrackedProcesses's doc comment in exec.go).
+func TestExecRefusesOverMaxTrackedProcesses(t *testing.T) {
+	sock, srv := startExecTestServer(t)
+
+	srv.mu.Lock()
+	for i := 0; i < maxTrackedProcesses; i++ {
+		srv.processes = append(srv.processes, netguard.ProcessInfo{PID: 100000 + i, Name: "filler"})
+	}
+	srv.mu.Unlock()
+
+	conn, resp := dialExec(t, sock, rpc.ExecParams{Mode: rpc.ExecModeCLI, Argv: []string{"echo", "hi"}})
+	defer conn.Close()
+	if resp.Error == "" {
+		t.Fatal("expected Exec to be refused once maxTrackedProcesses is already reached")
+	}
+	if !strings.Contains(resp.Error, "too many processes") {
+		t.Errorf("expected a 'too many processes' error, got %q", resp.Error)
 	}
 }
