@@ -15,13 +15,83 @@ type checkResult struct {
 	name string
 	ok   bool
 	info string
+	// fix, if non-nil, is a self-contained remediation this specific
+	// check knows how to apply — only set for failures doctor can safely
+	// resolve itself without root-owned package installs (that duplicate
+	// logic belongs in postinst/install.sh, not here — see runFixes).
+	// Returns a short description of what it did, or an error.
+	fix func() (string, error)
 }
 
 // cmdDoctor is vpnctl's brew-doctor/flutter-doctor-style self-check: every
 // system dependency and permission the network layer needs, printed as a
 // checklist so a failure is immediately actionable rather than surfacing as
-// a confusing mid-operation error.
+// a confusing mid-operation error. `vpnctl doctor --fix` additionally
+// applies whichever failing checks are safely self-fixable (see
+// checkResult.fix) and re-checks afterward.
 func cmdDoctor(args []string) error {
+	fixMode := false
+	for _, a := range args {
+		if a == "--fix" {
+			fixMode = true
+		}
+	}
+
+	results := runDoctorChecks()
+
+	if fixMode {
+		fixed := false
+		for _, r := range results {
+			if r.ok || r.fix == nil {
+				continue
+			}
+			desc, err := r.fix()
+			if err != nil {
+				fmt.Printf("[fix] %-28s failed: %v\n", r.name, err)
+				continue
+			}
+			fmt.Printf("[fix] %-28s %s\n", r.name, desc)
+			fixed = true
+		}
+		if fixed {
+			fmt.Println()
+			results = runDoctorChecks() // re-check: report the post-fix state below, not the stale pre-fix one
+		}
+	}
+
+	allOK := true
+	unfixedFailures := false
+	for _, r := range results {
+		mark := "✓"
+		if !r.ok {
+			mark = "✗"
+			allOK = false
+			if r.fix == nil {
+				unfixedFailures = true
+			}
+		}
+		if r.info != "" {
+			fmt.Printf("[%s] %-28s %s\n", mark, r.name, r.info)
+		} else {
+			fmt.Printf("[%s] %s\n", mark, r.name)
+		}
+	}
+
+	fmt.Println()
+	if allOK {
+		fmt.Println("All checks passed — vpnctl is ready to use.")
+		return nil
+	}
+	if !fixMode && !unfixedFailures {
+		fmt.Println("Some checks failed — see above. Run `vpnctl doctor --fix` to attempt automatic repair.")
+	} else {
+		fmt.Println("Some checks failed — see above. Run the installer again or install the missing pieces manually.")
+	}
+	os.Exit(1)
+	return nil
+}
+
+func runDoctorChecks() []checkResult {
 	var results []checkResult
 
 	results = append(results, checkBinary("ip", "iproute2")...)
@@ -39,8 +109,16 @@ func cmdDoctor(args []string) error {
 	results = append(results, checkStaleWireGuardSocket())
 
 	results = append(results, checkResult{
+		// Purely informational since the daemon migration: vpnctl itself
+		// (as opposed to vpnctld) has never needed root for anything,
+		// running as root isn't wrong either, so neither state is a real
+		// failure — this used to be `ok: sysuser.IsRoot()`, which made
+		// `vpnctl doctor` report overall failure (exit 1) for the correct,
+		// recommended way of running it (as a regular "vpnctl"-group
+		// member) ever since Phase 3 of DAEMON_MIGRATION.md removed the
+		// TUI's own RequireRoot() call.
 		name: "root/sudo",
-		ok:   sysuser.IsRoot(),
+		ok:   true,
 		info: rootInfo(),
 	})
 
@@ -48,28 +126,7 @@ func cmdDoctor(args []string) error {
 	results = append(results, checkSysctl())
 	results = append(results, checkDirs()...)
 
-	allOK := true
-	for _, r := range results {
-		mark := "✓"
-		if !r.ok {
-			mark = "✗"
-			allOK = false
-		}
-		if r.info != "" {
-			fmt.Printf("[%s] %-28s %s\n", mark, r.name, r.info)
-		} else {
-			fmt.Printf("[%s] %s\n", mark, r.name)
-		}
-	}
-
-	fmt.Println()
-	if allOK {
-		fmt.Println("All checks passed — vpnctl is ready to use.")
-		return nil
-	}
-	fmt.Println("Some checks failed — see above. Run the installer again or install the missing pieces manually.")
-	os.Exit(1)
-	return nil
+	return results
 }
 
 func checkBinary(name, pkg string) []checkResult {
@@ -106,16 +163,29 @@ func checkAWG() []checkResult {
 	return results
 }
 
-// checkVpnctld reports whether the daemon is reachable at all — during
-// this migration (see DAEMON_MIGRATION.md), use/down/status/test/ps/kill
-// all need it; a clear, upfront "daemon unreachable" here is more useful
-// than each of those commands separately failing to connect.
+// checkVpnctld reports whether the daemon is reachable at all — every
+// vpnctl subcommand (including the bare TUI, since Phase 3 of
+// DAEMON_MIGRATION.md) needs it; a clear, upfront "daemon unreachable"
+// here is more useful than each of those commands separately failing to
+// connect. --fix tries `systemctl start vpnctld` — the one dependency
+// failure here that doesn't need installing anything, just starting what's
+// already on disk, so it's safe to attempt without root-owned downloads.
 func checkVpnctld() checkResult {
 	if _, err := vpnctlclient.Status(); err != nil {
 		return checkResult{
 			name: "vpnctld",
 			ok:   false,
-			info: fmt.Sprintf("not reachable at %s — use/down/status/test/ps/kill need it running (%v)", vpnctlclient.SocketPath(), err),
+			info: fmt.Sprintf("not reachable at %s — every vpnctl command needs it running (%v)", vpnctlclient.SocketPath(), err),
+			fix: func() (string, error) {
+				if _, err := exec.LookPath("systemctl"); err != nil {
+					return "", fmt.Errorf("no systemctl on this system — start vpnctld manually")
+				}
+				out, err := exec.Command("systemctl", "start", "vpnctld").CombinedOutput()
+				if err != nil {
+					return "", fmt.Errorf("systemctl start vpnctld: %v: %s", err, out)
+				}
+				return "ran `systemctl start vpnctld`", nil
+			},
 		}
 	}
 	return checkResult{name: "vpnctld", ok: true, info: "reachable at " + vpnctlclient.SocketPath()}
@@ -147,17 +217,30 @@ func checkStaleWireGuardSocket() checkResult {
 		name: "WireGuard UAPI socket",
 		ok:   false,
 		info: fmt.Sprintf("stale socket at %s with no active profile — a previous amneziawg-go/awg-quick process likely didn't exit; `awg-quick up` will fail with \"UAPI listen error: unix socket in use\" until it's removed (`vpnctl down`, or `rm` it by hand if that doesn't help)", sockPath),
+		fix: func() (string, error) {
+			// Re-confirm immediately before removing: --fix runs after the
+			// initial check pass, and this file's whole point is a
+			// namespace/kill-switch socket a concurrent `vpnctl use` could
+			// have legitimately created in between.
+			if result, err := vpnctlclient.Status(); err == nil && result.Status.Active {
+				return "", fmt.Errorf("a profile is now active, socket is legitimate — not removing")
+			}
+			if err := os.Remove(sockPath); err != nil {
+				return "", err
+			}
+			return "removed stale socket at " + sockPath, nil
+		},
 	}
 }
 
 func rootInfo() string {
 	if sysuser.IsRoot() {
 		if sysuser.RanViaSudo() {
-			return "running as root via sudo"
+			return "running as root via sudo (not required — every vpnctl command talks to vpnctld over its socket and needs no sudo of its own)"
 		}
-		return "running as root"
+		return "running as root (not required by vpnctl itself — only vpnctld, the daemon, needs it)"
 	}
-	return "not root — `vpnctl run`/the TUI still need sudo directly (not yet migrated to vpnctld, see DAEMON_MIGRATION.md); use/down/status/test/ps/kill go through the daemon and don't need it"
+	return "not root, and that's fine — every vpnctl command (including the bare TUI) talks to vpnctld over its socket and needs no sudo, only membership in the 'vpnctl' group"
 }
 
 func checkNetns() checkResult {

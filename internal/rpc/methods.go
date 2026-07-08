@@ -33,6 +33,10 @@ type ActivateParams struct {
 	Family   string         `json:"family"` // profile.Family
 	WGRaw    string         `json:"wg_raw,omitempty"`
 	Outbound map[string]any `json:"outbound,omitempty"`
+	// Backup names another profile to auto-activate if this one's health
+	// check detects sustained connectivity loss — see profile.Meta.Backup
+	// and internal/vpnctld/failover.go. Empty when not configured.
+	Backup string `json:"backup,omitempty"`
 }
 
 // ActivateResult mirrors what actions.Activate returns today (status text

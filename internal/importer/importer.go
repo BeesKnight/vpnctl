@@ -14,6 +14,15 @@ import (
 	"github.com/BeesKnight/vpnctl/internal/sysuser"
 )
 
+// maxSubscriptionBytes bounds how much of a subscription response
+// ImportSubscription will read. A real subscription is a short list of
+// vless://Zhysteria2:// URIs — nothing legitimate needs more than a few
+// hundred KB — but the URL is arbitrary user input pointing at a server
+// vpnctl doesn't control, and a compromised or malicious subscription
+// endpoint returning gigabytes with no Content-Length set would otherwise
+// have io.ReadAll grow an unbounded buffer and OOM the calling process.
+const maxSubscriptionBytes = 4 << 20 // 4 MiB
+
 // ImportSubscription downloads url and imports every profile found in it
 // (see ImportSubscriptionBody).
 func ImportSubscription(url string) ([]string, error) {
@@ -26,9 +35,16 @@ func ImportSubscription(url string) ([]string, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetching subscription: HTTP %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	// Read one byte past the cap so an exactly-at-the-limit legitimate
+	// response isn't mistaken for a truncated/oversized one, but a
+	// genuinely larger body still gets rejected instead of silently
+	// truncated and mis-parsed.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxSubscriptionBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("reading subscription body: %w", err)
+	}
+	if len(body) > maxSubscriptionBytes {
+		return nil, fmt.Errorf("subscription response too large (over %d bytes) — refusing to read further", maxSubscriptionBytes)
 	}
 	return ImportSubscriptionBody(body)
 }

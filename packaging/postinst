@@ -28,10 +28,29 @@ installed_tun2socks=false
 installed_awg_tools=false
 installed_amneziawg_go=false
 
+# RELEASE_CACHE_DIR holds one cached /releases/latest JSON response per
+# repo (release_json below) so a repo whose release is consulted more than
+# once in a single postinst run (amneziawg-tools, for both `awg` and
+# `awg-quick`) doesn't hit the GitHub API twice, and so verify_checksum can
+# search the same asset list install_binary_from_release already fetched
+# for a companion checksums file, without a second API call.
+RELEASE_CACHE_DIR="$(mktemp -d)"
+trap 'rm -rf "$RELEASE_CACHE_DIR"' EXIT
+
+release_json() {
+  repo="$1"
+  cache_file="$RELEASE_CACHE_DIR/$(printf '%s' "$repo" | tr '/' '_').json"
+  if [ ! -s "$cache_file" ]; then
+    curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" -o "$cache_file" 2>/dev/null || true
+  fi
+  [ -s "$cache_file" ] || return 1
+  printf '%s' "$cache_file"
+}
+
 latest_release_urls() {
   repo="$1"
-  curl -fsSL "https://api.github.com/repos/${repo}/releases/latest" 2>/dev/null \
-    | jq -r '.assets[]?.browser_download_url' 2>/dev/null
+  cf="$(release_json "$repo")" || return 1
+  jq -r '.assets[]?.browser_download_url' "$cf" 2>/dev/null
 }
 
 asset_matches() {
@@ -41,6 +60,102 @@ asset_matches() {
     *"$bin_lc"*linux*"$NORM_ARCH"*|*linux*"$NORM_ARCH"*"$bin_lc"*|*"$bin_lc"*"$NORM_ARCH"*linux*|*"$NORM_ARCH"*linux*"$bin_lc"*) return 0 ;;
     *) return 1 ;;
   esac
+}
+
+# verify_checksum best-effort-verifies a downloaded release asset against a
+# companion checksums file in the same GitHub release (checksums.txt/
+# SHA256SUMS/*.sha256/*.dgst — covers sing-box, Xray-core, and the common
+# GoReleaser convention alike). Every binary installed this way ends up
+# root-owned in /usr/bin and is later invoked as root (via nsenter, inside
+# the kill-switch namespace) — previously nothing here checked that what
+# got downloaded was actually what upstream published, so a compromised
+# release asset or an on-path MITM would install silently.
+#
+# Returns 0 (proceed) when verified OK, *and* when verification genuinely
+# isn't possible (no checksums file published for this release) — refusing
+# every install just because a smaller upstream project doesn't publish
+# checksums would be a worse regression than today's zero-verification
+# baseline. Returns 1 (refuse) only when a checksums file was found and the
+# hash actually didn't match — that's the real "something is wrong" signal.
+verify_checksum() {
+  repo="$1"
+  asset_filename="$2"
+  asset_path="$3"
+
+  cf="$(release_json "$repo")" || {
+    log "WARNING: could not verify checksum for $asset_filename (release metadata unavailable) — installing unverified"
+    return 0
+  }
+
+  # Prefer a checksums file scoped to exactly this asset (Xray-core's
+  # convention: one "<asset>.dgst" per platform binary in the same
+  # release) before falling back to a single release-wide checksums file
+  # (sing-box/GoReleaser convention) — a release with many per-platform
+  # assets has many same-shaped checksum filenames, and grabbing the first
+  # "*.dgst"-looking one regardless of which platform it belongs to would
+  # compare our downloaded asset against an unrelated platform's hash,
+  # turning a best-effort verification into a guaranteed false mismatch.
+  checksums_url=""
+  while IFS= read -r candidate; do
+    case "$(basename "$candidate")" in
+      "$asset_filename.dgst"|"$asset_filename.sha256"|"$asset_filename.sha256sum")
+        checksums_url="$candidate"
+        break
+        ;;
+    esac
+  done <<EOF
+$(jq -r '.assets[]?.browser_download_url' "$cf" 2>/dev/null)
+EOF
+
+  if [ -z "$checksums_url" ]; then
+    while IFS= read -r candidate; do
+      case "$(basename "$candidate" | tr '[:upper:]' '[:lower:]')" in
+        *checksums*|*sha256sum*|sha256sums*)
+          checksums_url="$candidate"
+          break
+          ;;
+      esac
+    done <<EOF
+$(jq -r '.assets[]?.browser_download_url' "$cf" 2>/dev/null)
+EOF
+  fi
+
+  if [ -z "$checksums_url" ]; then
+    log "WARNING: $repo does not publish a checksums file for this release — installing $asset_filename unverified"
+    return 0
+  fi
+
+  tmp_sums="$(mktemp)"
+  if ! curl -fsSL "$checksums_url" -o "$tmp_sums" 2>/dev/null; then
+    log "WARNING: could not download checksums file for $asset_filename — installing unverified"
+    rm -f "$tmp_sums"
+    return 0
+  fi
+
+  actual="$(sha256sum "$asset_path" 2>/dev/null | awk '{print $1}')"
+  # Most projects' checksums files list "<hash>  <filename>" per line; some
+  # (Xray-core's .dgst) are scoped to a single asset already and just have
+  # one or more "ALGO= <hash>" lines with no filename to match against —
+  # fall back to the first sha256-shaped hex string in the file.
+  expected="$(grep -iF "$asset_filename" "$tmp_sums" 2>/dev/null | grep -oE '[0-9a-fA-F]{64}' | head -1)"
+  if [ -z "$expected" ]; then
+    expected="$(grep -oE '[0-9a-fA-F]{64}' "$tmp_sums" 2>/dev/null | head -1)"
+  fi
+  rm -f "$tmp_sums"
+
+  if [ -z "$expected" ]; then
+    log "WARNING: checksums file for $asset_filename didn't contain a recognizable sha256 — installing unverified"
+    return 0
+  fi
+
+  actual_lc="$(printf '%s' "$actual" | tr '[:upper:]' '[:lower:]')"
+  expected_lc="$(printf '%s' "$expected" | tr '[:upper:]' '[:lower:]')"
+  if [ "$actual_lc" != "$expected_lc" ]; then
+    log "ERROR: checksum mismatch for $asset_filename (expected $expected_lc, got $actual_lc) — refusing to install a possibly corrupted or tampered download"
+    return 1
+  fi
+  log "checksum verified for $asset_filename"
+  return 0
 }
 
 install_binary_from_release() {
@@ -63,6 +178,10 @@ EOF
   tmp="$(mktemp -d)"
   asset="$tmp/asset"
   if ! curl -fsSL "$url" -o "$asset" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! verify_checksum "$repo" "$(basename "$url")" "$asset"; then
     rm -rf "$tmp"
     return 1
   fi
@@ -140,6 +259,10 @@ EOF
   tmp="$(mktemp -d)"
   asset="$tmp/asset.zip"
   if ! curl -fsSL "$url" -o "$asset" 2>/dev/null; then
+    rm -rf "$tmp"
+    return 1
+  fi
+  if ! verify_checksum "$repo" "$asset_name" "$asset"; then
     rm -rf "$tmp"
     return 1
   fi
@@ -274,5 +397,107 @@ cat > "$DEPS_FILE" <<EOF
 EOF
 log "dependency install record: $DEPS_FILE"
 
-log "done. Run 'vpnctl doctor' to verify your setup, then 'vpnctl use <profile>' to get started."
+# --- vpnctld daemon: group, one-time migration, enable+start -------------
+# vpnctl moved from "every CLI/TUI invocation manages netns/iptables/engine
+# state itself, coordinating through ~/.local/state/vpnctl/active.json" to
+# a privileged system service (vpnctld) that owns all of that in memory;
+# vpnctl is now an unprivileged client talking to it over /run/vpnctl.sock.
+# See DAEMON_MIGRATION.md.
+VPNCTL_GROUP="vpnctl"
+
+setup_daemon_group() {
+  groupadd -f "$VPNCTL_GROUP"
+  real_user="${SUDO_USER:-}"
+  if [ -n "$real_user" ] && [ "$real_user" != "root" ]; then
+    usermod -aG "$VPNCTL_GROUP" "$real_user"
+    log "added $real_user to the '$VPNCTL_GROUP' group (log out/in, or run 'newgrp $VPNCTL_GROUP', for it to take effect in already-open shells)"
+  else
+    log "no non-root invoking user detected (\$SUDO_USER unset) — add the intended vpnctl user(s) to the '$VPNCTL_GROUP' group manually: usermod -aG $VPNCTL_GROUP <user>"
+  fi
+}
+
+# migrate_from_file_based_model runs the same PID-kill/namespace/socket
+# cleanup as packaging/prerm's force_teardown, applied here as a one-time
+# upgrade migration. If this machine is upgrading from a pre-daemon vpnctl
+# (every invocation tracking its own active.json), any leftover namespace
+# or engine process from that old model has to be torn down *before*
+# vpnctld starts for the first time — the daemon has no knowledge of it,
+# so left alone it would either leave vpnctl0 orphaned forever or conflict
+# with the daemon's own first `use`.
+migrate_from_file_based_model() {
+  home="$1"
+  state_dir="$home/.local/state/vpnctl"
+  active_json="$state_dir/active.json"
+  [ -f "$active_json" ] || return 0
+
+  log "found leftover active.json from the pre-daemon vpnctl at $active_json, tearing down before starting vpnctld..."
+
+  if command -v jq >/dev/null 2>&1; then
+    # `. > 0`, not `. != 0`: active.json lives under a normal user's own
+    # home directory and is fully user-writable, so a hand-edited negative
+    # PID here must never reach `kill` — kill(-N, sig) doesn't fail, it
+    # broadcasts the signal to an entire process *group*, and kill(-1, sig)
+    # (from an "engine_pid": -1, say) signals every process this script's
+    # caller (root, during install) has permission to signal, i.e. the
+    # whole machine.
+    pids="$(jq -r '
+      [.engine_pid, .helper_pid, .health_pid] + [(.processes // [])[].pid]
+      | .[] | select(type == "number" and . > 0 and (. % 1 == 0))
+    ' "$active_json" 2>/dev/null)"
+    for pid in $pids; do
+      case "$pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
+      kill "$pid" 2>/dev/null || true
+    done
+    if [ -n "$pids" ]; then
+      sleep 0.3
+      for pid in $pids; do
+        case "$pid" in
+          ''|*[!0-9]*) continue ;;
+        esac
+        kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
+      done
+    fi
+  fi
+
+  if command -v ip >/dev/null 2>&1 && ip netns list 2>/dev/null | grep -q '^vpnctl0\b'; then
+    log "namespace vpnctl0 still present after teardown, removing it"
+    ip netns del vpnctl0 2>/dev/null || true
+  fi
+
+  if [ -S /var/run/wireguard/vpnctl-wg.sock ]; then
+    log "stale WireGuard UAPI socket found, removing it"
+    rm -f /var/run/wireguard/vpnctl-wg.sock
+  fi
+
+  rm -f "$active_json"
+}
+
+run_migration() {
+  [ -d /root/.local/state/vpnctl ] && migrate_from_file_based_model /root
+  for state_dir in /home/*/.local/state/vpnctl; do
+    [ -d "$state_dir" ] || continue
+    migrate_from_file_based_model "${state_dir%/.local/state/vpnctl}"
+  done
+}
+
+start_daemon() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log "WARNING: systemctl not found — install/enable the vpnctld systemd unit manually (see packaging/vpnctld.service)"
+    return 0
+  fi
+  systemctl daemon-reload
+  if systemctl enable --now vpnctld; then
+    log "vpnctld enabled and started (systemctl status vpnctld to check)"
+  else
+    log "WARNING: failed to enable/start vpnctld — check 'systemctl status vpnctld' and 'journalctl -u vpnctld'"
+  fi
+}
+
+run_migration
+setup_daemon_group
+start_daemon
+
+log "done. Run 'vpnctl doctor' to verify your setup, then 'vpnctl use <profile>' to get started (no sudo needed once vpnctld is running and you're in the '$VPNCTL_GROUP' group)."
 exit 0

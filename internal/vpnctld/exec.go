@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -23,6 +24,14 @@ import (
 // as internal/netguard's killTrackedProcesses.
 const terminateGrace = 3 * time.Second
 
+// maxTrackedProcesses bounds how many processes Exec will launch and track
+// at once. Without this, a client with nothing more than ordinary "vpnctl"
+// group membership could run e.g. `for i in 1..10000; do vpnctl run --
+// sleep 999 & done` and exhaust the host's process table/fd limits — gui
+// mode's launches are especially cheap to spam since the exec.go RPC call
+// itself returns as soon as the process starts, well before it exits.
+const maxTrackedProcesses = 256
+
 // handleExecConn services one MethodExec request end to end: builds the
 // command inside the active namespace exactly like netguard.Engine.Command
 // always has, then hands it to the mode-specific runner. The initial
@@ -30,7 +39,7 @@ const terminateGrace = 3 * time.Second
 // is answered here with either an error or ExecStartedResult once the
 // process has actually started — after that point the connection carries
 // rpc.Frames instead of further Request/Response pairs.
-func (s *Server) handleExecConn(conn net.Conn, req rpc.Request) {
+func (s *Server) handleExecConn(conn net.Conn, req rpc.Request, peer peerIdentity) {
 	var params rpc.ExecParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {
 		writeExecError(conn, req.ID, fmt.Errorf("decoding params: %w", err))
@@ -47,10 +56,18 @@ func (s *Server) handleExecConn(conn net.Conn, req rpc.Request) {
 		writeExecError(conn, req.ID, fmt.Errorf("no active profile — activate one first"))
 		return
 	}
+	if len(s.processes) >= maxTrackedProcesses {
+		s.mu.Unlock()
+		writeExecError(conn, req.ID, fmt.Errorf("too many processes already running through vpnctl (limit %d) — kill some first", maxTrackedProcesses))
+		return
+	}
 	ng := s.ng
 	s.mu.Unlock()
 
-	opts := netguard.ExecOptions{Env: params.Env, DropToUID: params.DropUID, DropToGID: params.DropGID}
+	dropUID, dropGID := execDropTarget(peer, params.DropUID, params.DropGID)
+	s.logger.Printf("audit: uid=%d exec mode=%s argv=%q drop_to=%s", peer.UID, params.Mode, params.Argv, formatDropTarget(dropUID))
+
+	opts := netguard.ExecOptions{Env: params.Env, DropToUID: dropUID, DropToGID: dropGID}
 	cmd, err := ng.Command(params.Argv[0], params.Argv[1:], opts)
 	if err != nil {
 		writeExecError(conn, req.ID, err)
@@ -65,6 +82,40 @@ func (s *Server) handleExecConn(conn net.Conn, req rpc.Request) {
 	default:
 		s.execPipes(conn, req, cmd, params.Argv)
 	}
+}
+
+// execDropTarget decides who Exec's target process actually runs as. The
+// client-supplied params.DropUID/GID (rpc.ExecParams) can never be trusted
+// on their own: /run/vpnctl.sock is reachable by every member of the
+// "vpnctl" group, and without this check a non-root peer could simply omit
+// DropUID/GID (or set them to 0) to get its command run as root — the
+// daemon's own euid, since ng.Command only drops privilege when
+// opts.DropToUID/GID is non-nil (see netguard.LinuxEngine.Command). A
+// non-root peer's real, kernel-verified identity (SO_PEERCRED, see
+// peercred_linux.go) always wins for a non-root peer, no matter what it
+// asked for — this makes `vpnctl run`/the TUI's Run screen/Apps panel run
+// as the invoking user, matching what "no sudo needed" was always meant to
+// mean, not "runs as root now instead". Only a genuinely root peer's own
+// request is honored as-is, since root asking to drop to a lesser uid
+// (e.g. for a GUI app's X11 passthrough under `sudo vpnctl run --gui`) is
+// safe — it can only ever reduce that peer's own privilege, never grant it
+// someone else's.
+func execDropTarget(peer peerIdentity, clientUID, clientGID *int) (*int, *int) {
+	if peer.UID == 0 {
+		return clientUID, clientGID
+	}
+	uid, gid := int(peer.UID), int(peer.GID)
+	return &uid, &gid
+}
+
+// formatDropTarget renders a *int for the audit log — %d on a *int prints
+// the pointer's address, not the value it points to, which would make
+// every log line show a useless heap address instead of a uid.
+func formatDropTarget(uid *int) string {
+	if uid == nil {
+		return "root(no-drop)"
+	}
+	return strconv.Itoa(*uid)
 }
 
 func writeExecError(conn net.Conn, id uint64, err error) {

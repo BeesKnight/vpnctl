@@ -1,69 +1,64 @@
 #!/bin/bash
-# vpnctl prerm — runs before the binary is removed (both `apt remove` and
-# `apt purge`). Gracefully tears down any active profile first: `vpnctl
-# down` already does the full idempotent job (namespace/iptables teardown,
-# sysctl restore from its own backup, killing tracked engine/health-check/
-# run processes by PID) for whichever real user has it active — this script
-# just needs to find that user and hand vpnctl its home directory directly
-# via $VPNCTL_STATE_HOME (internal/sysuser.RealHome honors it above any
-# $SUDO_USER/$HOME lookup), since dpkg runs maintainer scripts as root with a
-# stripped, non-interactive environment where re-deriving the home directory
-# from $SUDO_USER alone has previously resolved to the wrong account and left
-# `vpnctl down` finding no active.json to act on.
+# vpnctl prerm — runs before vpnctl's files are removed (both `apt remove`
+# and `apt purge`, which always runs a remove pass first: `old-prerm
+# remove` -> files removed -> `old-postrm remove`, purge only adds a later
+# `old-postrm purge` for leftover config, see packaging/postrm).
 #
-# dpkg additionally resets $PATH to a fixed, minimal
-# "/usr/sbin:/usr/bin:/sbin:/bin" for every maintainer script it runs — this
-# is dpkg's own behavior, unconditional and unrelated to whatever PATH the
-# invoking shell/sudo session had. Since nfpm.yaml installs vpnctl to
-# /usr/local/bin (not one of those four directories), `command -v vpnctl`
-# here always failed under a real `apt remove`/`apt purge` even though it
-# succeeds when this script is run by hand — confirmed on a live stand by
-# instrumenting this file and diffing its actual dpkg-invoked $PATH against
-# an interactive one. That made the whole teardown below unreachable on
-# every real removal, regardless of the $SUDO_USER/$HOME fix. Resolving the
-# absolute install path directly (falling back to PATH for anyone who
-# installed vpnctl somewhere else) is what actually fixes it.
+# Since the daemon migration, tearing down the active profile is vpnctld's
+# own job: Server.Shutdown() -> deactivateLocked() already does a full
+# graceful teardown (namespace/iptables/sysctl restore/killing every
+# tracked process) when it receives SIGTERM, which `systemctl stop` sends
+# it. This requires packaging/vpnctld.service's KillMode=process — see the
+# comment on that setting for why (systemd's default KillMode would kill
+# vpnctld's own teardown child mid-flight and leave the namespace behind).
+#
+# force_teardown below is kept only as a fallback for when the daemon is
+# already dead/unresponsive at removal time (systemctl stop failed, or
+# vpnctld wasn't running/installed at all) — same PID-kill/namespace-removal
+# logic postinst's migrate_from_file_based_model uses for the reverse case
+# (upgrading onto the daemon from the pre-daemon per-user model).
 set -u
 
-VPNCTL_BIN=/usr/local/bin/vpnctl
-if [ ! -x "$VPNCTL_BIN" ]; then
-  VPNCTL_BIN="$(command -v vpnctl 2>/dev/null || true)"
-fi
-if [ -z "$VPNCTL_BIN" ]; then
-  exit 0
-fi
-
-# force_teardown is a belt-and-suspenders cleanup that always runs after
-# `vpnctl down`, whether or not that call reported success: it kills exactly
-# the PIDs active.json recorded — never by process name/pattern, since an
-# unrelated sing-box or xray the user runs independently of vpnctl must never
-# be touched by a package purge (same invariant as killTrackedProcesses in
-# internal/netguard/linux.go) — and removes the namespace/UAPI socket if
-# they're still around. This is what keeps a purge from leaving vpnctl0 or an
-# orphaned engine process (holding /var/run/wireguard/vpnctl-wg.sock) behind
-# even if `vpnctl down`'s own state resolution fails for some reason.
+# force_teardown kills exactly the PIDs an active.json recorded — never by
+# process name/pattern, since an unrelated sing-box or xray the user runs
+# independently of vpnctl must never be touched by a package removal (same
+# invariant as killTrackedProcesses in internal/netguard/linux.go) — and
+# removes the namespace/UAPI socket if they're still around.
 force_teardown() {
   state_dir="$1"
   active_json="$state_dir/active.json"
 
   if [ -f "$active_json" ] && command -v jq >/dev/null 2>&1; then
+    # `. > 0`, not `. != 0`: active.json lives under a normal user's own
+    # home directory and is fully user-writable, so a hand-edited negative
+    # PID here must never reach `kill` — kill(-N, sig) doesn't fail, it
+    # broadcasts the signal to an entire process *group*, and kill(-1, sig)
+    # (from an "engine_pid": -1, say) signals every process this script's
+    # caller (root, during install/removal) has permission to signal, i.e.
+    # the whole machine.
     pids="$(jq -r '
       [.engine_pid, .helper_pid, .health_pid] + [(.processes // [])[].pid]
-      | .[] | select(. != null and . != 0)
+      | .[] | select(type == "number" and . > 0 and (. % 1 == 0))
     ' "$active_json" 2>/dev/null)"
     for pid in $pids; do
+      case "$pid" in
+        ''|*[!0-9]*) continue ;;
+      esac
       kill "$pid" 2>/dev/null || true
     done
     if [ -n "$pids" ]; then
       sleep 0.3
       for pid in $pids; do
+        case "$pid" in
+          ''|*[!0-9]*) continue ;;
+        esac
         kill -0 "$pid" 2>/dev/null && kill -9 "$pid" 2>/dev/null || true
       done
     fi
   fi
 
   if command -v ip >/dev/null 2>&1 && ip netns list 2>/dev/null | grep -q '^vpnctl0\b'; then
-    echo "vpnctl prerm: namespace vpnctl0 still present after teardown, removing it"
+    echo "vpnctl prerm: namespace vpnctl0 still present, removing it"
     ip netns del vpnctl0 2>/dev/null || true
   fi
 
@@ -73,28 +68,54 @@ force_teardown() {
   fi
 }
 
-teardown_for() {
-  user="$1"
-  home="$2"
-  state_dir="$home/.local/state/vpnctl"
-  [ -f "$state_dir/active.json" ] || return 0
-
-  echo "vpnctl prerm: tearing down active profile for $user..."
-  if [ "$user" = "root" ]; then
-    VPNCTL_STATE_HOME="$home" "$VPNCTL_BIN" down || echo "vpnctl prerm: WARNING: teardown for root failed, continuing removal anyway"
-  else
-    VPNCTL_STATE_HOME="$home" SUDO_USER="$user" "$VPNCTL_BIN" down || echo "vpnctl prerm: WARNING: teardown for $user failed, continuing removal anyway"
+# stop_daemon succeeds if vpnctld was already stopped/never running
+# (nothing to do) or `systemctl stop` reported success. It fails if
+# systemctl isn't available or the stop itself failed — the caller treats
+# either as a signal to fall back to force_teardown.
+stop_daemon() {
+  if ! command -v systemctl >/dev/null 2>&1; then
+    return 1
   fi
-  force_teardown "$state_dir"
+  if ! systemctl is-active --quiet vpnctld 2>/dev/null; then
+    return 0
+  fi
+  echo "vpnctl prerm: stopping vpnctld..."
+  systemctl stop vpnctld
 }
 
-[ -d /root/.local/state/vpnctl ] && teardown_for root /root
+daemon_stopped=true
+stop_daemon || daemon_stopped=false
+if [ "$daemon_stopped" != true ]; then
+  echo "vpnctl prerm: WARNING: could not stop vpnctld cleanly, falling back to manual teardown"
+fi
 
-for state_dir in /home/*/.local/state/vpnctl; do
-  [ -d "$state_dir" ] || continue
-  home="${state_dir%/.local/state/vpnctl}"
-  user="${home#/home/}"
-  teardown_for "$user" "$home"
-done
+# Run the fallback sweep whenever the daemon stop wasn't confirmed clean, OR
+# the namespace is still around despite it (belt-and-suspenders), OR for any
+# leftover per-user active.json from the pre-daemon model on a machine that
+# was upgraded straight to a version with this prerm without ever going
+# through postinst's one-time migration.
+namespace_present=false
+if command -v ip >/dev/null 2>&1 && ip netns list 2>/dev/null | grep -q '^vpnctl0\b'; then
+  namespace_present=true
+fi
+
+if [ "$daemon_stopped" != true ] || [ "$namespace_present" = true ]; then
+  [ -d /root/.local/state/vpnctl ] && force_teardown /root/.local/state/vpnctl
+  for state_dir in /home/*/.local/state/vpnctl; do
+    [ -d "$state_dir" ] || continue
+    force_teardown "$state_dir"
+  done
+fi
+
+# Only disable on an actual removal — dpkg calls this "prerm upgrade
+# <new-version>" for upgrades, where disabling would just make the new
+# package's postinst re-enable it a moment later (harmless but pointless).
+# This has to run before dpkg removes the unit file: `systemctl disable`
+# needs to read the file's [Install] section to know which symlinks to
+# drop, which won't work once the file itself is gone (i.e. this can't be
+# deferred to postrm purge).
+if [ "${1:-}" = "remove" ] && command -v systemctl >/dev/null 2>&1; then
+  systemctl disable vpnctld 2>/dev/null || true
+fi
 
 exit 0

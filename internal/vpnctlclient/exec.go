@@ -10,6 +10,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"syscall"
+	"time"
 
 	"golang.org/x/term"
 
@@ -119,7 +120,19 @@ func relay(conn net.Conn, isPTY bool) (int, error) {
 	// os.Stdin -> conn, until EOF (signaled with an empty FrameStdin so the
 	// daemon can close the remote stdin without treating it as a dropped
 	// connection — see relayStdin/relayPTYInput's hardDrop distinction).
+	//
+	// stdinDone lets the deferred cleanup below wait for this goroutine to
+	// actually exit before relay returns — otherwise, once the caller (a
+	// `vpnctl run --tui`/TUI app-launch `tea.Exec`) hands the terminal back,
+	// this goroutine is still blocked in os.Stdin.Read and races bubbletea's
+	// own stdin reader for the next keystroke, occasionally swallowing it.
+	// Canceling via SetReadDeadline is the same trick execPTY uses
+	// server-side (internal/vpnctld/exec.go) to unstick relayPTYInput
+	// before touching ptmx again — the fd is shared, blocked reads on it
+	// can't be canceled any other way.
+	stdinDone := make(chan struct{})
 	go func() {
+		defer close(stdinDone)
 		buf := make([]byte, 32*1024)
 		for {
 			n, err := os.Stdin.Read(buf)
@@ -134,12 +147,18 @@ func relay(conn net.Conn, isPTY bool) (int, error) {
 			}
 		}
 	}()
+	defer func() {
+		_ = os.Stdin.SetReadDeadline(time.Now())
+		<-stdinDone
+		_ = os.Stdin.SetReadDeadline(time.Time{})
+	}()
 
 	if isPTY {
 		winch := make(chan os.Signal, 1)
 		signal.Notify(winch, syscall.SIGWINCH)
-		defer signal.Stop(winch)
+		winchDone := make(chan struct{})
 		go func() {
+			defer close(winchDone)
 			for range winch {
 				w, h, err := term.GetSize(int(os.Stdin.Fd()))
 				if err != nil {
@@ -153,6 +172,15 @@ func relay(conn net.Conn, isPTY bool) (int, error) {
 					return
 				}
 			}
+		}()
+		// signal.Stop guarantees no further sends to winch once it
+		// returns, so closing it right after is safe and is what actually
+		// lets the `for range winch` goroutine above exit — Stop alone
+		// doesn't close the channel, it would otherwise block forever.
+		defer func() {
+			signal.Stop(winch)
+			close(winch)
+			<-winchDone
 		}()
 	}
 

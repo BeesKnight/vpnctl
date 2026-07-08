@@ -250,6 +250,45 @@ func TestVLESSUsesTCP(t *testing.T) {
 	}
 }
 
+// TestVLESSKCPTransportUsesUDP locks in a real bug fix: mKCP and QUIC are
+// VLESS transports that run directly over UDP, not a TCP tunnel — a
+// profile.Kind of KindVLESS alone can't tell a kcp/quic profile apart from
+// a tcp/ws/grpc one, since Kind is the same for all of them. Getting this
+// wrong used to mean the kill-switch's own point-to-point ACCEPT rule was
+// written for the wrong protocol, silently dropping the VLESS+kcp
+// profile's actual traffic — connects to nothing, no distinguishing error.
+func TestVLESSKCPTransportUsesUDP(t *testing.T) {
+	withTempHome(t)
+	p := profile.Profile{
+		Name:   "de-mkcp",
+		Family: profile.FamilyProxy,
+		Kind:   profile.KindVLESS,
+		Server: "1.2.3.4",
+		Port:   443,
+		Outbound: map[string]any{
+			"type":        "vless",
+			"server":      "1.2.3.4",
+			"server_port": 443,
+			"uuid":        "test-uuid",
+			"transport":   map[string]any{"type": "kcp"},
+		},
+	}
+	e := NewLinuxEngine(true)
+	status, err := e.Setup(p)
+	if err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if status.Protocol != "udp" {
+		t.Fatalf("expected udp for VLESS+kcp, got %s", status.Protocol)
+	}
+	if !containsCmd(e.Recorded(), "-A OUTPUT -p udp -d 1.2.3.4 --dport 443 -j ACCEPT") {
+		t.Fatalf("expected a udp point-to-point ACCEPT rule for VLESS+kcp, got:\n%s", strings.Join(e.Recorded(), "\n"))
+	}
+	if containsCmd(e.Recorded(), "-A OUTPUT -p tcp -d 1.2.3.4 --dport 443 -j ACCEPT") {
+		t.Fatalf("did not expect a tcp point-to-point ACCEPT rule for VLESS+kcp, got:\n%s", strings.Join(e.Recorded(), "\n"))
+	}
+}
+
 func TestSysctlBackupOnlyCapturedOnce(t *testing.T) {
 	withTempHome(t)
 	dir, err := EnsureStateDir()

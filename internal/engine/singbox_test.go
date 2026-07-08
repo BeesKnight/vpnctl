@@ -82,6 +82,21 @@ func TestWriteSingBoxConfigPreservesOutboundFieldsAndOverridesServer(t *testing.
 	if tunIn["auto_route"] != true || tunIn["strict_route"] != true {
 		t.Errorf("expected auto_route and strict_route enabled, got auto_route=%v strict_route=%v", tunIn["auto_route"], tunIn["strict_route"])
 	}
+	// Regression test for a real bug found live: "system" stack needs the
+	// OS to complete TCP handshakes itself and redirect them to sing-box
+	// via NAT/TPROXY rules that never actually get installed inside
+	// vpnctl's namespace — the SYN reaches the tun device (confirmed with
+	// tcpdump) and is accepted by the kill-switch, but sing-box's own tun
+	// inbound never logs it and no redirect rule ever appears in the
+	// namespace's nftables ruleset, so every TCP connection just times out
+	// silently (UDP, e.g. DNS, worked regardless, which is what made this
+	// look like a routing bug rather than a stack bug at first). "gvisor"
+	// terminates connections directly from the raw tun packets in
+	// userspace, no OS cooperation needed — confirmed working end-to-end
+	// against a real Hysteria2 server on the same setup "system" failed on.
+	if tunIn["stack"] != "gvisor" {
+		t.Errorf("expected TUN stack \"gvisor\" (\"system\" silently drops all TCP traffic in vpnctl's namespace), got %v", tunIn["stack"])
+	}
 	excludes, ok := tunIn["route_exclude_address"].([]any)
 	if !ok || len(excludes) != 1 || excludes[0] != "185.220.10.5/32" {
 		t.Errorf("expected resolved server IP to be excluded from TUN routes, got %v", tunIn["route_exclude_address"])

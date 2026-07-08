@@ -290,8 +290,20 @@ func applyTransportStreamSettings(stream map[string]any, network string, transpo
 }
 
 // applyTLSStreamSettings translates the imported tls block (enabled,
-// server_name, insecure, utls.fingerprint, reality.*) into Xray-core's
-// security/tlsSettings/realitySettings fields.
+// server_name, insecure, pinned_cert_sha256, utls.fingerprint, reality.*)
+// into Xray-core's security/tlsSettings/realitySettings fields.
+//
+// Deliberately never emits "allowInsecure": current Xray-core hard-rejects
+// it at config-build time ("The feature allowInsecure has been removed and
+// migrated to pinnedPeerCertSha256") — Xray fails to start at all, tun2socks
+// then has no local SOCKS inbound to connect to, and the whole profile just
+// times out with no error that points at the real cause. tls.insecure
+// (still meaningful for sing-box/Hysteria2, which never removed the plain
+// boolean) is intentionally ignored here; profile.SetTLSInsecure resolves
+// it into tls.pinned_cert_sha256 for VLESS profiles instead — see that
+// function's doc comment for the full story and why pinning is arguably a
+// real improvement over the old blanket skip-verification bit, not just a
+// workaround for its removal.
 func applyTLSStreamSettings(stream map[string]any, tls map[string]any) {
 	enabled, _ := tls["enabled"].(bool)
 	if !enabled {
@@ -300,7 +312,7 @@ func applyTLSStreamSettings(stream map[string]any, tls map[string]any) {
 	}
 
 	serverName, _ := tls["server_name"].(string)
-	insecure, _ := tls["insecure"].(bool)
+	pin, _ := tls["pinned_cert_sha256"].(string)
 	fingerprint := ""
 	if utls, ok := tls["utls"].(map[string]any); ok {
 		fingerprint, _ = utls["fingerprint"].(string)
@@ -325,8 +337,8 @@ func applyTLSStreamSettings(stream map[string]any, tls map[string]any) {
 	}
 
 	tlsSettings := map[string]any{"serverName": serverName}
-	if insecure {
-		tlsSettings["allowInsecure"] = true
+	if pin != "" {
+		tlsSettings["pinnedPeerCertSha256"] = pin
 	}
 	if fingerprint != "" {
 		tlsSettings["fingerprint"] = fingerprint

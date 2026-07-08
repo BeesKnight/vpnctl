@@ -45,7 +45,25 @@ type activeState struct {
 	status     netguard.Status // authoritative snapshot; healthCheckLoop keeps ResolvedIP current
 	handle     engine.Handle
 	healthStop context.CancelFunc
+
+	// activatedByUID/GID identify who ran Activate, from SO_PEERCRED (see
+	// peerIdentity) rather than anything self-reported — healthCheckLoop
+	// uses this to target a desktop notification at the right session when
+	// the tunnel's health flips (see notify.go). Zero when activated by
+	// root directly: root has no desktop session of its own to notify.
+	activatedByUID, activatedByGID uint32
 }
+
+// maxConcurrentConns bounds how many connections vpnctld services at once.
+// /run/vpnctl.sock is reachable by every member of the "vpnctl" group, not
+// just one trusted caller, so nothing stopped a client from opening
+// connections faster than handleConn's connDeadline expires them and
+// exhausting the daemon's goroutines/fds before this cap existed. Accept
+// itself blocks once the cap is hit (see the semaphore acquire below,
+// which happens before the next Accept call) rather than accepting and
+// then rejecting — excess connection attempts pile up in the kernel's own
+// listen backlog instead of costing vpnctld anything.
+const maxConcurrentConns = 64
 
 // Server is vpnctld's connection-handling and state-owning core.
 type Server struct {
@@ -86,6 +104,7 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 		_ = ln.Close()
 	}()
 
+	connSem := make(chan struct{}, maxConcurrentConns)
 	for {
 		conn, err := ln.Accept()
 		if err != nil {
@@ -96,7 +115,11 @@ func (s *Server) Serve(ctx context.Context, ln net.Listener) error {
 				return err
 			}
 		}
-		go s.handleConn(conn)
+		connSem <- struct{}{}
+		go func() {
+			defer func() { <-connSem }()
+			s.handleConn(conn)
+		}()
 	}
 }
 
@@ -113,9 +136,26 @@ func (s *Server) Shutdown() {
 	}
 }
 
+// peerIdentity is the real, kernel-verified uid/gid of whoever is on the
+// other end of a connection (see peercred_linux.go) — the only thing
+// handleExecConn trusts for privilege-drop decisions. Anything in the RPC
+// payload itself (rpc.ExecParams.DropUID/DropGID) is client-supplied and
+// must never be trusted for that purpose; it can only ever narrow what a
+// root peer asks for, never let a non-root peer claim to be someone else.
+type peerIdentity struct {
+	UID, GID uint32
+}
+
 func (s *Server) handleConn(conn net.Conn) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(connDeadline))
+
+	uid, gid, err := peerCredentials(conn)
+	if err != nil {
+		s.logger.Printf("rejecting connection: could not determine peer credentials: %v", err)
+		return
+	}
+	peer := peerIdentity{UID: uid, GID: gid}
 
 	var req rpc.Request
 	if err := rpc.ReadMessage(conn, &req); err != nil {
@@ -132,12 +172,12 @@ func (s *Server) handleConn(conn net.Conn) {
 	// of closing after a single reply — see exec.go. Every other method
 	// stays plain request/response, handled by dispatch below.
 	if req.Method == rpc.MethodExec {
-		s.handleExecConn(conn, req)
+		s.handleExecConn(conn, req, peer)
 		return
 	}
 
 	resp := rpc.Response{ID: req.ID}
-	if result, err := s.dispatch(req.Method, req.Params); err != nil {
+	if result, err := s.dispatch(req.Method, req.Params, peer); err != nil {
 		resp.Error = err.Error()
 	} else if data, err := json.Marshal(result); err != nil {
 		resp.Error = fmt.Sprintf("marshaling result: %v", err)
@@ -148,7 +188,7 @@ func (s *Server) handleConn(conn net.Conn) {
 	_ = rpc.WriteMessage(conn, &resp)
 }
 
-func (s *Server) dispatch(method string, params json.RawMessage) (any, error) {
+func (s *Server) dispatch(method string, params json.RawMessage, peer peerIdentity) (any, error) {
 	switch method {
 	case rpc.MethodPing:
 		return s.handlePing()
@@ -157,9 +197,9 @@ func (s *Server) dispatch(method string, params json.RawMessage) (any, error) {
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("decoding params: %w", err)
 		}
-		return s.handleActivate(p)
+		return s.handleActivate(p, peer)
 	case rpc.MethodDeactivate:
-		return s.handleDeactivate()
+		return s.handleDeactivate(peer)
 	case rpc.MethodStatus:
 		return s.handleStatus()
 	case rpc.MethodTestConnectivity:
@@ -171,7 +211,7 @@ func (s *Server) dispatch(method string, params json.RawMessage) (any, error) {
 		if err := json.Unmarshal(params, &p); err != nil {
 			return nil, fmt.Errorf("decoding params: %w", err)
 		}
-		return s.handleKillProcess(p)
+		return s.handleKillProcess(p, peer)
 	case rpc.MethodGetLogTail:
 		var p rpc.GetLogTailParams
 		if err := json.Unmarshal(params, &p); err != nil {

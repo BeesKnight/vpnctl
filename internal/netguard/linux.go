@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -131,7 +132,7 @@ func (e *LinuxEngine) Setup(p profile.Profile) (Status, error) {
 	if err != nil {
 		return Status{}, fmt.Errorf("resolving server for profile %q: %w", p.Name, err)
 	}
-	proto := protocolFor(p.Kind)
+	proto := protocolForProfile(p)
 
 	// Idempotent clean slate: never layer a new namespace/ruleset on top of
 	// a previous one. If a prior Setup died halfway through, this clears it.
@@ -434,7 +435,7 @@ func (e *LinuxEngine) UpdateEndpoint(p profile.Profile) (bool, string, error) {
 			return state, nil
 		}
 
-		proto := protocolFor(p.Kind)
+		proto := protocolForProfile(p)
 
 		// Remove the old point-to-point rules (both namespace and host)
 		// before installing new ones — never have both old and new open at
@@ -616,6 +617,14 @@ func killTrackedProcesses(state *ActiveState) {
 	for _, p := range state.Processes {
 		pids = append(pids, p.PID)
 	}
+	// ActiveState is loaded from active.json (LoadActiveState), which lives
+	// under the invoking user's own home directory and is fully
+	// user-writable — a hand-edited negative PID must never reach Signal:
+	// unlike a normal kill(2) target, a negative pid signals an entire
+	// process *group*, and -1 specifically broadcasts to every process the
+	// caller (root, in the daemon/old-CLI-as-root cases this runs in) has
+	// permission to signal, i.e. the whole machine.
+	pids = slices.DeleteFunc(pids, func(pid int) bool { return pid <= 0 })
 	for _, pid := range pids {
 		proc, err := os.FindProcess(pid)
 		if err != nil {

@@ -43,6 +43,11 @@ type Profile struct {
 
 	WG       *WireGuardConfig // set when Family == FamilyWG
 	Outbound map[string]any   // set when Family == FamilyProxy (raw sing-box outbound object)
+
+	// Backup names another profile to auto-activate on sustained
+	// connectivity loss (see Meta.Backup / internal/vpnctld/failover.go).
+	// Empty when not configured — auto-failover is opt-in per profile.
+	Backup string
 }
 
 // DisplayName is what the TUI/list output should show for this profile.
@@ -108,6 +113,17 @@ func LoadAll() ([]Profile, error) {
 	if err != nil {
 		return nil, err
 	}
+	return LoadAllFromDir(base)
+}
+
+// LoadAllFromDir is LoadAll against an explicit profiles base directory
+// instead of resolving one from the current process's own real user. Only
+// vpnctld's failover.go needs this: it runs as a single system-wide daemon
+// with no "current user" of its own, but a specific target uid (whoever
+// ran Activate, from SO_PEERCRED) whose profiles directory it needs to
+// consult to resolve a backup profile by name — every other caller wants
+// the calling process's own profiles and should keep using LoadAll/Find.
+func LoadAllFromDir(base string) ([]Profile, error) {
 	var out []Profile
 
 	wgProfiles, err := loadWGDir(filepath.Join(base, string(FamilyWG)))
@@ -167,6 +183,20 @@ func Find(name string) (Profile, error) {
 	if err != nil {
 		return Profile{}, err
 	}
+	return findIn(all, name)
+}
+
+// FindInDir is Find against an explicit profiles base directory — see
+// LoadAllFromDir's doc comment for why this exists.
+func FindInDir(base, name string) (Profile, error) {
+	all, err := LoadAllFromDir(base)
+	if err != nil {
+		return Profile{}, err
+	}
+	return findIn(all, name)
+}
+
+func findIn(all []Profile, name string) (Profile, error) {
 	for _, p := range all {
 		if p.Name == name {
 			return p, nil
@@ -207,6 +237,7 @@ func loadWGDir(dir string) ([]Profile, error) {
 			Label:   meta.Label,
 			Path:    path,
 			WG:      wg,
+			Backup:  meta.Backup,
 		})
 	}
 	return out, nil
@@ -252,6 +283,7 @@ func loadProxyDir(dir string) ([]Profile, error) {
 			Label:    meta.Label,
 			Path:     path,
 			Outbound: outbound,
+			Backup:   meta.Backup,
 		})
 	}
 	return out, nil
