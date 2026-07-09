@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -42,10 +41,7 @@ func startWireGuard(ng netguard.Engine, p profile.Profile, status netguard.Statu
 		return nil, err
 	}
 
-	quickBin, err := awgQuickBinary(p.Kind)
-	if err != nil {
-		return nil, err
-	}
+	quickBin := awgQuickBinaryName(p.Kind)
 
 	cmd, err := ng.Command(quickBin, []string{"up", confPath}, netguard.ExecOptions{})
 	if err != nil {
@@ -70,20 +66,27 @@ func startWireGuard(ng netguard.Engine, p profile.Profile, status netguard.Statu
 	return &wgHandle{ng: ng, confPath: confPath, logPath: logPath, kind: p.Kind}, nil
 }
 
-// awgQuickBinary prefers the AmneziaWG-specific wrapper, falling back to
-// plain wg-quick when it's a non-obfuscated WireGuard profile and
-// amneziawg-tools isn't installed.
-func awgQuickBinary(kind profile.Kind) (string, error) {
-	if _, err := exec.LookPath("awg-quick"); err == nil {
-		return "awg-quick", nil
-	}
+// awgQuickBinaryName picks the wrapper binary by the profile's own kind —
+// AmneziaWG-obfuscated profiles need amneziawg-tools' awg-quick; plain
+// WireGuard profiles use the stock wg-quick.
+//
+// This used to also probe the host directly (exec.LookPath) to decide
+// which binary was actually present, preferring awg-quick whenever it
+// existed regardless of kind, and returning a descriptive error otherwise.
+// That ran unconditionally, on every call, including from every test that
+// exercises this path with a fake netguard.Engine specifically to avoid
+// touching the real host — so any test activating a WireGuard-family
+// profile failed on a machine (e.g. a CI runner) without wg-quick/
+// awg-quick installed, regardless of the injected fake. Picking by kind
+// alone is deterministic and fully mockable: ng.Command()'s own exec
+// failure (see cmd.Run() below) surfaces just as clearly if the chosen
+// binary genuinely isn't installed, and `vpnctl doctor` (cmd/vpnctl/doctor.go's
+// checkAWG) already gives the friendly, proactive diagnostic for that.
+func awgQuickBinaryName(kind profile.Kind) string {
 	if kind == profile.KindAmneziaWG {
-		return "", fmt.Errorf("awg-quick not found: AmneziaWG profiles require amneziawg-tools")
+		return "awg-quick"
 	}
-	if _, err := exec.LookPath("wg-quick"); err == nil {
-		return "wg-quick", nil
-	}
-	return "", fmt.Errorf("wg-quick not found: install amneziawg-tools or wireguard-tools")
+	return "wg-quick"
 }
 
 // writeResolvedConf copies the profile's WireGuard config to a fixed path
@@ -206,10 +209,7 @@ func stopWireGuard(ng netguard.Engine, kind profile.Kind) error {
 	if _, err := os.Stat(confPath); os.IsNotExist(err) {
 		return nil
 	}
-	quickBin, err := awgQuickBinary(kind)
-	if err != nil {
-		return err
-	}
+	quickBin := awgQuickBinaryName(kind)
 	cmd, err := ng.Command(quickBin, []string{"down", confPath}, netguard.ExecOptions{})
 	if err != nil {
 		return err
