@@ -234,8 +234,17 @@ func (s *Server) execPipes(conn net.Conn, req rpc.Request, cmd *exec.Cmd, argv [
 	go func() { defer relayWG.Done(); relayToFrames(stdout, rpc.FrameStdout, writeFrame) }()
 	go func() { defer relayWG.Done(); relayToFrames(stderr, rpc.FrameStderr, writeFrame) }()
 
-	done := make(chan error, 1)
-	go func() { done <- cmd.Wait() }()
+	// pipesDone fires once both stdout and stderr have hit EOF, which for a
+	// plain (non-PTY) child only happens once the process has exited and
+	// closed its end of both pipes. cmd.Wait() must not run until then: Wait
+	// closes the parent's read end of StdoutPipe()/StderrPipe() as soon as
+	// it sees the process exit, and racing that against relayToFrames'
+	// still-in-flight Read() can silently drop whatever output was sitting
+	// in the pipe buffer — for a fast command like `echo`, easily lost
+	// before relayToFrames even gets scheduled. Go's own docs warn: "it is
+	// incorrect to call Wait before all reads from the pipe have completed."
+	pipesDone := make(chan struct{})
+	go func() { relayWG.Wait(); close(pipesDone) }()
 
 	// connDropped fires only once the connection itself actually
 	// closes/errors — never on a clean local stdin EOF (e.g. `vpnctl run --
@@ -246,13 +255,13 @@ func (s *Server) execPipes(conn net.Conn, req rpc.Request, cmd *exec.Cmd, argv [
 	connDropped := make(chan struct{})
 	go func() { relayStdin(conn, stdin); close(connDropped) }()
 
-	var waitErr error
 	select {
-	case waitErr = <-done:
+	case <-pipesDone:
 	case <-connDropped:
-		waitErr = terminateAndWait(cmd.Process, done)
+		terminateProcess(cmd.Process, pipesDone)
+		<-pipesDone
 	}
-	relayWG.Wait()
+	waitErr := cmd.Wait()
 	_ = writeFrame(rpc.FrameExit, mustMarshalJSON(toExitMessage(waitErr)))
 }
 
@@ -433,6 +442,20 @@ func terminateAndWait(proc *os.Process, done <-chan error) error {
 	case <-time.After(terminateGrace):
 		_ = proc.Signal(syscall.SIGKILL)
 		return <-done
+	}
+}
+
+// terminateProcess is execPipes' equivalent of terminateAndWait, adapted
+// for the fact that execPipes can't watch a cmd.Wait() result channel
+// without racing StdoutPipe()/StderrPipe() (see the pipesDone comment in
+// execPipes) — it watches pipesDone instead, which closes once the
+// process has exited and both pipes have hit EOF.
+func terminateProcess(proc *os.Process, pipesDone <-chan struct{}) {
+	_ = proc.Signal(syscall.SIGTERM)
+	select {
+	case <-pipesDone:
+	case <-time.After(terminateGrace):
+		_ = proc.Signal(syscall.SIGKILL)
 	}
 }
 
